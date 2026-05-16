@@ -17,4 +17,13 @@ def test_orchestrator_mentions_not_runtime():
 def test_evaluator_mentions_websearch_and_hallucination():
     assert "할루시네이션" in EVALUATOR
     assert "tavily" in EVALUATOR.lower()
-    assert SCANNER
+
+
+def test_scanner_defines_json_output():
+    assert "JSON" in SCANNER
+    assert "import_graph_summary" in SCANNER
+
+
+def test_criteria_prompts_inject_their_key():
+    for key, prompt in CRITERIA_PROMPTS.items():
+        assert f'"criterion": "{key}"' in prompt
