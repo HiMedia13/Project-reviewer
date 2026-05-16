@@ -1,0 +1,11 @@
+deepagents
+langchain
+langchain-anthropic
+langsmith
+tavily-python
+GitPython
+rich
+jinja2
+fastapi
+uvicorn
+pytest

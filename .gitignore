@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.repocache/
+output/
+*.sqlite3
+*.db
+.venv/
