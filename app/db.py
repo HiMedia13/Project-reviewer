@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime, timezone
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS repos (
@@ -54,3 +55,48 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # running the script and performs no implicit commit afterward, so
     # this commit is what persists the DDL. Do not remove.
     conn.commit()
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def upsert_repo(conn, remote_url: str, local_path: str, default_branch: str) -> int:
+    existing = get_repo_by_url(conn, remote_url)
+    if existing:
+        conn.execute(
+            "UPDATE repos SET local_path=?, default_branch=? WHERE id=?",
+            (local_path, default_branch, existing["id"]),
+        )
+        conn.commit()
+        return existing["id"]
+    cur = conn.execute(
+        "INSERT INTO repos (remote_url, local_path, default_branch, created_at) "
+        "VALUES (?,?,?,?)",
+        (remote_url, local_path, default_branch, _now()),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_repo_by_url(conn, remote_url: str):
+    return conn.execute(
+        "SELECT * FROM repos WHERE remote_url=?", (remote_url,)
+    ).fetchone()
+
+
+def create_evaluation(conn, repo_id, commit_sha, parent_eval_id, mode) -> int:
+    cur = conn.execute(
+        "INSERT INTO evaluations (repo_id, commit_sha, parent_eval_id, mode, "
+        "created_at) VALUES (?,?,?,?,?)",
+        (repo_id, commit_sha, parent_eval_id, mode, _now()),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def latest_evaluation(conn, repo_id: int):
+    return conn.execute(
+        "SELECT * FROM evaluations WHERE repo_id=? ORDER BY id DESC LIMIT 1",
+        (repo_id,),
+    ).fetchone()
