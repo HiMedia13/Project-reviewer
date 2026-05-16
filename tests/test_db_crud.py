@@ -20,6 +20,8 @@ def test_upsert_repo_is_idempotent(tmp_path):
     rid2 = upsert_repo(c, "https://x/y.git", "/tmp/y", "main")
     assert rid == rid2
     assert get_repo_by_url(c, "https://x/y.git")["id"] == rid
+    count = c.execute("SELECT COUNT(*) AS n FROM repos").fetchone()["n"]
+    assert count == 1
 
 
 def test_latest_evaluation_returns_most_recent(tmp_path):
