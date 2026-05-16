@@ -6,12 +6,15 @@ def test_full_when_no_prior(tmp_path):
                     force=False)
     assert s.mode == "full"
     assert set(s.in_scope) == {"a.py", "b.py"}
+    assert s.cached == []
 
 
 def test_full_when_forced():
     s = plan_scope(prior_sha="abc", repo_path=None, all_files=["a.py"],
                    force=True)
     assert s.mode == "full"
+    assert s.in_scope == ["a.py"]
+    assert s.cached == []
 
 
 def test_incremental_uses_changed_plus_reverse(monkeypatch):

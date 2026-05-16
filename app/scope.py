@@ -1,6 +1,7 @@
 """Scope planner: decides full vs incremental evaluation for a review run."""
 
 from dataclasses import dataclass
+from typing import Literal
 
 from app.repo_manager import changed_files, reverse_import_expand
 
@@ -16,7 +17,7 @@ class Scope:
         cached: Files whose prior evaluation results can be reused as-is.
     """
 
-    mode: str            # "full" | "incremental"
+    mode: Literal["full", "incremental"]  # "full" | "incremental"
     in_scope: list[str]  # files to send to the agent
     cached: list[str]    # unchanged files reused from prior evaluation
 
@@ -42,14 +43,14 @@ def plan_scope(prior_sha, repo_path, all_files, force: bool) -> Scope:
     Returns:
         A :class:`Scope` instance describing which files to evaluate.
     """
-    all_set = list(all_files)
+    all_list = list(all_files)
     if force or not prior_sha:
-        return Scope("full", all_set, [])
+        return Scope("full", all_list, [])
     try:
         changed = changed_files(repo_path, prior_sha)
-        expanded = reverse_import_expand(repo_path, changed, all_set)
+        expanded = reverse_import_expand(repo_path, changed, all_list)
     except Exception:
-        return Scope("full", all_set, [])
-    in_scope = sorted(f for f in all_set if f in expanded)
-    cached = sorted(f for f in all_set if f not in expanded)
+        return Scope("full", all_list, [])
+    in_scope = sorted(f for f in all_list if f in expanded)
+    cached = sorted(f for f in all_list if f not in expanded)
     return Scope("incremental", in_scope, cached)
