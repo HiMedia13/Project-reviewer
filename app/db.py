@@ -40,6 +40,7 @@ CREATE INDEX IF NOT EXISTS idx_eval_repo ON evaluations(repo_id);
 
 
 def connect(db_path: str) -> sqlite3.Connection:
+    """Open a SQLite connection with Row factory and foreign keys enabled."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -47,5 +48,9 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
+    """Create all tables and indexes if they do not already exist."""
     conn.executescript(SCHEMA)
+    # Required: executescript only commits a pending transaction before
+    # running the script and performs no implicit commit afterward, so
+    # this commit is what persists the DDL. Do not remove.
     conn.commit()
