@@ -1,3 +1,4 @@
+import ast
 import hashlib
 import re
 import shutil
@@ -84,3 +85,60 @@ def inventory_files(repo_path: str) -> list[str]:
 def file_hash(path: str) -> str:
     """Return the SHA-1 hex digest of the file's raw bytes."""
     return hashlib.sha1(Path(path).read_bytes()).hexdigest()
+
+
+def changed_files(repo_path: str, since_sha: str) -> set[str]:
+    """Return the set of file paths changed between since_sha and HEAD."""
+    repo = Repo(repo_path)
+    out = repo.git.diff("--name-only", f"{since_sha}..HEAD")
+    return {line.strip() for line in out.splitlines() if line.strip()}
+
+
+def _module_to_paths(module: str) -> set[str]:
+    """Return candidate relative file paths that could correspond to the given module name."""
+    parts = module.split(".")
+    return {
+        "/".join(parts) + ".py",
+        "/".join(parts) + "/__init__.py",
+        parts[-1] + ".py",
+    }
+
+
+def _python_imports(source: str) -> set[str]:
+    """Parse Python source and return all imported module names."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    mods: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for n in node.names:
+                mods.add(n.name)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            mods.add(node.module)
+    return mods
+
+
+def reverse_import_expand(repo_path, seed_files, all_files) -> set[str]:
+    """Expand seed_files to include any .py files in all_files that import them."""
+    root = Path(repo_path)
+    seed = set(seed_files)
+    target_paths: set[str] = set()
+    for sf in seed:
+        if sf.endswith(".py"):
+            target_paths.add(sf)
+    expanded = set(seed)
+    for f in all_files:
+        if not f.endswith(".py") or f in expanded:
+            continue
+        try:
+            src = (root / f).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        importer_targets: set[str] = set()
+        for m in _python_imports(src):
+            importer_targets |= _module_to_paths(m)
+        if importer_targets & target_paths:
+            expanded.add(f)
+    return expanded
