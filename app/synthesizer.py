@@ -15,8 +15,9 @@ def synthesize(finding_rows) -> dict:
 
     For each criterion in CRITERIA, computes the mean ``criterion_score`` of all
     rows where ``verified`` is truthy. Criteria with no verified scores yield None.
-    The overall ``score`` is the mean of the non-None criterion averages, or None
-    if all criteria are absent.
+    The overall ``score`` is the mean of the **rounded** per-criterion averages
+    (rounding is applied both at the per-criterion level and again to the overall),
+    or None if all criteria are absent.
 
     Args:
         finding_rows: Iterable of dicts with keys ``criterion``, ``criterion_score``,

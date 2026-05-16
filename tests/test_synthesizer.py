@@ -29,3 +29,12 @@ def test_empty_rows_yield_none_scores():
     out = synthesize([])
     assert out["score"] is None
     assert all(v is None for v in out["criteria"].values())
+
+
+def test_verified_false_bool_is_excluded():
+    rows = [
+        {"criterion": "library", "criterion_score": 10, "verified": False},
+        {"criterion": "library", "criterion_score": 88, "verified": True},
+    ]
+    out = synthesize(rows)
+    assert out["criteria"]["library"] == 88
