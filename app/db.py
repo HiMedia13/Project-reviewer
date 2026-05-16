@@ -135,7 +135,8 @@ def findings_for_evaluation(conn, evaluation_id: int):
     ).fetchall()
 
 
-def finalize_evaluation(conn, evaluation_id, overall, cost, duration_sec) -> None:
+def finalize_evaluation(conn, evaluation_id: int, overall: dict, cost: dict,
+                         duration_sec: float) -> None:
     """Write the final overall/cost/duration onto an existing evaluation row."""
     conn.execute(
         "UPDATE evaluations SET overall_json=?, total_input_tokens=?, "
