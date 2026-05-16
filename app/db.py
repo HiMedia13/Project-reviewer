@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import datetime, timezone
 
@@ -111,3 +112,54 @@ def latest_evaluation(conn, repo_id: int):
         "SELECT * FROM evaluations WHERE repo_id=? ORDER BY id DESC LIMIT 1",
         (repo_id,),
     ).fetchone()
+
+
+def insert_finding(conn, repo_id, evaluation_id, file_path, file_hash,
+                   criterion, findings, score, verified, verify_note) -> int:
+    """Persist a single file-level findings row; return its new row id."""
+    cur = conn.execute(
+        "INSERT INTO file_findings (repo_id, evaluation_id, file_path, "
+        "file_hash, criterion, findings_json, criterion_score, verified, "
+        "verify_note) VALUES (?,?,?,?,?,?,?,?,?)",
+        (repo_id, evaluation_id, file_path, file_hash, criterion,
+         json.dumps(findings), score, 1 if verified else 0, verify_note),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def findings_for_evaluation(conn, evaluation_id: int):
+    """Return all file_findings rows for the given evaluation id."""
+    return conn.execute(
+        "SELECT * FROM file_findings WHERE evaluation_id=?", (evaluation_id,)
+    ).fetchall()
+
+
+def copy_unchanged_findings(conn, repo_id, src_eval, dst_eval, file_paths) -> int:
+    """Copy findings rows for unchanged files from one evaluation to another.
+
+    Avoids re-running the LLM for files whose content has not changed.
+    Returns the number of rows copied.
+    """
+    if not file_paths:
+        return 0
+    # Safe f-string: only interpolates '?' characters (parameter count),
+    # never user data — all values remain bound via parameterized query.
+    placeholders = ",".join("?" * len(file_paths))
+    src_rows = conn.execute(
+        f"SELECT file_path, file_hash, criterion, findings_json, "
+        f"criterion_score, verified, verify_note FROM file_findings "
+        f"WHERE evaluation_id=? AND file_path IN ({placeholders})",
+        (src_eval, *file_paths),
+    ).fetchall()
+    for r in src_rows:
+        conn.execute(
+            "INSERT INTO file_findings (repo_id, evaluation_id, file_path, "
+            "file_hash, criterion, findings_json, criterion_score, verified, "
+            "verify_note) VALUES (?,?,?,?,?,?,?,?,?)",
+            (repo_id, dst_eval, r["file_path"], r["file_hash"], r["criterion"],
+             r["findings_json"], r["criterion_score"], r["verified"],
+             r["verify_note"]),
+        )
+    conn.commit()
+    return len(src_rows)
