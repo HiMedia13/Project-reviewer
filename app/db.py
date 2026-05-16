@@ -135,6 +135,19 @@ def findings_for_evaluation(conn, evaluation_id: int):
     ).fetchall()
 
 
+def finalize_evaluation(conn, evaluation_id, overall, cost, duration_sec) -> None:
+    """Write the final overall/cost/duration onto an existing evaluation row."""
+    conn.execute(
+        "UPDATE evaluations SET overall_json=?, total_input_tokens=?, "
+        "total_output_tokens=?, total_cost_usd=?, langsmith_run_url=?, "
+        "duration_sec=? WHERE id=?",
+        (json.dumps(overall), cost.get("input_tokens", 0),
+         cost.get("output_tokens", 0), cost.get("cost_usd", 0.0),
+         cost.get("run_url"), duration_sec, evaluation_id),
+    )
+    conn.commit()
+
+
 def copy_unchanged_findings(conn, repo_id, src_eval, dst_eval, file_paths) -> int:
     """Copy findings rows for unchanged files from one evaluation to another.
 
