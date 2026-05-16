@@ -120,7 +120,7 @@ def _python_imports(source: str) -> set[str]:
     return mods
 
 
-def reverse_import_expand(repo_path, seed_files, all_files) -> set[str]:
+def reverse_import_expand(repo_path: str, seed_files: set[str], all_files: list[str]) -> set[str]:
     """Expand seed_files to include any .py files in all_files that import them."""
     root = Path(repo_path)
     seed = set(seed_files)
