@@ -63,3 +63,6 @@ def test_full_then_incremental_reuses_cache(tmp_path, monkeypatch):
     rows = cli.db.findings_for_evaluation(db, latest["id"])
     paths = {r["file_path"] for r in rows}
     assert paths == {"a.py", "b.py"}               # a.py reused from cache
+    assert latest["mode"] == "incremental"         # mode recorded
+    reports = list((Path(workdir) / "output").glob("report-*.html"))
+    assert len(reports) == 2                        # one HTML per run

@@ -52,7 +52,6 @@ def review(remote_url: str, workdir: str, force: bool) -> dict:
     trace_id = str(uuid.uuid4())
     os.environ.setdefault("LANGSMITH_PROJECT", "project-reviewer")
     started = time.time()
-    rows = []
     if scope.in_scope:
         raw = run_evaluation(repo_path, scope.in_scope)
         for r in parse_findings(raw):
@@ -63,7 +62,6 @@ def review(remote_url: str, workdir: str, force: bool) -> dict:
                 r["findings"], r["criterion_score"], r["verified"],
                 r["verify_note"],
             )
-        rows = list(db.findings_for_evaluation(conn, eval_id))
     duration = time.time() - started
 
     all_rows = list(db.findings_for_evaluation(conn, eval_id))
