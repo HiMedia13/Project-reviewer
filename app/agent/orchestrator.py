@@ -18,19 +18,19 @@ def build_agent(repo_path: str, in_scope: list[str]):
 
     subagents = [
         {"name": "scanner", "description": "프로젝트 구조 스캐너",
-         "prompt": SCANNER, "tools": [list_tool, read_tool]},
+         "system_prompt": SCANNER, "tools": [list_tool, read_tool]},
     ]
     for crit, prompt in CRITERIA_PROMPTS.items():
         subagents.append({
             "name": crit,
             "description": f"{crit} 기준 평가자",
-            "prompt": prompt,
+            "system_prompt": prompt,
             "tools": [list_tool, read_tool],
         })
     subagents.append({
         "name": "evaluator",
         "description": "findings 검증자(critic), 신기술은 웹검색",
-        "prompt": EVALUATOR,
+        "system_prompt": EVALUATOR,
         "tools": [read_tool, tavily],
     })
 
