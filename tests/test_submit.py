@@ -4,9 +4,15 @@ Pure unit tests: no LLM, no network. They exercise the normalization
 helper directly and the tool via its LangChain ``.invoke`` interface.
 """
 
+import sys
+
 import pytest
 
-from app.agent.submit import make_submit_tool, normalize_rows
+from app.agent.submit import (
+    finalize_findings,
+    make_submit_tool,
+    normalize_rows,
+)
 from app.findings_parser import parse_findings
 
 _KEYS = {
@@ -239,3 +245,246 @@ def test_normalize_rows_non_list_findings_no_raise():
     out = normalize_rows([{"file_path": "x.py", "findings": "oops"}])
     assert len(out) == 1
     assert out[0]["findings"] == []
+
+
+# --------------------------------------------------------------------------
+# finalize_findings: deterministic finalize guard (P2). Pure: fake model via
+# the ``_model_factory`` seam, never network / langchain_anthropic.
+# --------------------------------------------------------------------------
+
+
+class _FakeResp:
+    def __init__(self, tool_calls):
+        # Mirrors LangChain AIMessage.tool_calls shape.
+        if tool_calls is not _NO_ATTR:
+            self.tool_calls = tool_calls
+
+
+_NO_ATTR = object()
+
+
+class _FakeChat:
+    """Records bind_tools args; .invoke returns a preset response/raises."""
+
+    def __init__(self, resp=None, raise_exc=None):
+        self._resp = resp
+        self._raise_exc = raise_exc
+        self.bound_tool_choice = None
+        self.bound_tools = None
+        self.invoked_messages = None
+
+    def bind_tools(self, tools, tool_choice=None):
+        self.bound_tools = tools
+        self.bound_tool_choice = tool_choice
+        return self
+
+    def invoke(self, messages):
+        self.invoked_messages = messages
+        if self._raise_exc is not None:
+            raise self._raise_exc
+        return self._resp
+
+
+def _factory_for(chat):
+    captured = {}
+
+    def _factory(model_name):
+        captured["model"] = model_name
+        return chat
+
+    _factory.captured = captured
+    return _factory
+
+
+def test_finalize_happy_path_captures_via_normalize_rows():
+    holder: dict = {}
+    chat = _FakeChat(
+        resp=_FakeResp(
+            [
+                {
+                    "name": "submit_findings",
+                    "args": {
+                        "findings": [
+                            {
+                                "file_path": "a.py",
+                                "criterion": "eng",
+                                "verified": True,
+                                "criterion_score": 80,
+                            }
+                        ]
+                    },
+                    "id": "call_1",
+                }
+            ]
+        )
+    )
+    factory = _factory_for(chat)
+
+    rows = finalize_findings(
+        holder, "raw eval text", model="m", _model_factory=factory
+    )
+
+    assert rows is holder["findings"]
+    assert holder["submitted"] is True
+    assert len(rows) == 1
+    rec = rows[0]
+    assert set(rec.keys()) == _KEYS
+    assert rec["file_path"] == "a.py"
+    assert rec["criterion"] == "eng"
+    assert rec["criterion_score"] == 80
+    assert rec["verified"] is True
+    # forced tool call
+    assert chat.bound_tool_choice == "submit_findings"
+    assert chat.bound_tools is not None and len(chat.bound_tools) == 1
+    assert factory.captured["model"] == "m"
+
+
+def test_finalize_noop_when_already_submitted_with_findings():
+    existing = [
+        {
+            "file_path": "x.py",
+            "criterion": "unknown",
+            "findings": [],
+            "criterion_score": None,
+            "verified": False,
+            "verify_note": "",
+        }
+    ]
+    holder = {"submitted": True, "findings": existing}
+
+    def _exploding_factory(model_name):
+        raise AssertionError("model factory must NOT be called on no-op")
+
+    rows = finalize_findings(
+        holder, "seed", model="m", _model_factory=_exploding_factory
+    )
+
+    assert rows is existing
+    assert holder["findings"] is existing
+    assert holder["submitted"] is True
+
+
+def test_finalize_attempts_guard_when_submitted_but_no_findings():
+    holder = {"submitted": True, "findings": []}
+    chat = _FakeChat(
+        resp=_FakeResp(
+            [
+                {
+                    "name": "submit_findings",
+                    "args": {"findings": [{"file_path": "z.py"}]},
+                    "id": "c",
+                }
+            ]
+        )
+    )
+    rows = finalize_findings(
+        holder, "seed", model="m", _model_factory=_factory_for(chat)
+    )
+    assert len(rows) == 1
+    assert rows[0]["file_path"] == "z.py"
+    assert holder["submitted"] is True
+
+
+@pytest.mark.parametrize(
+    "tool_calls",
+    [
+        [],  # no tool calls
+        _NO_ATTR,  # response has no .tool_calls attribute at all
+        [{"name": "submit_findings", "args": {}}],  # args missing findings
+        [{"name": "submit_findings", "args": {"findings": "garbage"}}],
+        [{"name": "submit_findings", "args": {"findings": 123}}],
+        [{"name": "submit_findings", "args": {"findings": None}}],
+        [{"name": "submit_findings"}],  # no args key
+        [{"name": "other_tool", "args": {"findings": [{"file_path": "a"}]}}],
+        [{"name": "submit_findings", "args": None}],  # args not a dict
+    ],
+)
+def test_finalize_malformed_response_no_raise(tool_calls):
+    holder: dict = {}
+    chat = _FakeChat(resp=_FakeResp(tool_calls))
+    rows = finalize_findings(
+        holder, "seed", model="m", _model_factory=_factory_for(chat)
+    )
+    assert rows == []
+    assert holder["findings"] == []
+    assert holder["submitted"] is True
+
+
+def test_finalize_other_tool_name_first_then_submit():
+    # First call is a different tool; the submit_findings call is used.
+    holder: dict = {}
+    chat = _FakeChat(
+        resp=_FakeResp(
+            [
+                {"name": "noise", "args": {"x": 1}},
+                {
+                    "name": "submit_findings",
+                    "args": {"findings": [{"file_path": "good.py"}]},
+                },
+            ]
+        )
+    )
+    rows = finalize_findings(
+        holder, "seed", model="m", _model_factory=_factory_for(chat)
+    )
+    assert len(rows) == 1
+    assert rows[0]["file_path"] == "good.py"
+
+
+def test_finalize_exception_path_no_propagate():
+    holder: dict = {}
+    chat = _FakeChat(raise_exc=RuntimeError("boom"))
+    rows = finalize_findings(
+        holder, "seed", model="m", _model_factory=_factory_for(chat)
+    )
+    assert rows == []
+    assert holder["findings"] == []
+    assert holder["submitted"] is True
+
+
+def test_finalize_exception_preserves_preexisting_findings():
+    existing = [{"file_path": "p.py", "criterion": "unknown",
+                 "findings": [], "criterion_score": None,
+                 "verified": False, "verify_note": ""}]
+    # submitted not True -> guard runs; model raises -> degrade gracefully
+    holder = {"submitted": False, "findings": existing}
+    chat = _FakeChat(raise_exc=RuntimeError("boom"))
+    rows = finalize_findings(
+        holder, "seed", model="m", _model_factory=_factory_for(chat)
+    )
+    assert rows == existing
+    assert holder["submitted"] is True
+
+
+@pytest.mark.parametrize(
+    "seed", ["", "x" * 200000], ids=["empty", "large"]
+)
+def test_finalize_seed_text_variations(seed):
+    holder: dict = {}
+    chat = _FakeChat(
+        resp=_FakeResp(
+            [{"name": "submit_findings",
+              "args": {"findings": [{"file_path": "s.py"}]}}]
+        )
+    )
+    rows = finalize_findings(
+        holder, seed, model="m", _model_factory=_factory_for(chat)
+    )
+    assert len(rows) == 1
+    assert rows[0]["file_path"] == "s.py"
+
+
+def test_finalize_does_not_import_langchain_anthropic():
+    # The _model_factory seam must avoid the lazy ChatAnthropic import.
+    sys.modules.pop("langchain_anthropic", None)
+    holder: dict = {}
+    chat = _FakeChat(
+        resp=_FakeResp(
+            [{"name": "submit_findings",
+              "args": {"findings": [{"file_path": "n.py"}]}}]
+        )
+    )
+    finalize_findings(
+        holder, "seed", model="m", _model_factory=_factory_for(chat)
+    )
+    assert "langchain_anthropic" not in sys.modules

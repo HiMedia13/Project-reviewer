@@ -232,3 +232,110 @@ def make_submit_tool(holder: dict) -> StructuredTool:
         ),
         args_schema=SubmitFindingsArgs,
     )
+
+
+# Korean instruction prefixed to the seed text for the finalize guard. The
+# model is forced (tool_choice) to emit a submit_findings call, so this only
+# needs to point it at the schema and forbid prose.
+_FINALIZE_INSTRUCTION = (
+    "아래는 코드 평가 결과 원문이다. 이를 submit_findings 스키마"
+    "(file_path/criterion/findings/criterion_score/verified/verify_note)에 "
+    "맞는 JSON으로 변환해 submit_findings 도구를 호출하라. 설명 금지."
+)
+
+
+def _default_chat(model: str):
+    """Lazily construct the real chat model.
+
+    Imported lazily so importing this module (and the ``_model_factory``
+    test seam) needs no network / API key / langchain_anthropic install.
+    """
+    from langchain_anthropic import ChatAnthropic
+
+    return ChatAnthropic(model=model, max_tokens=8000)
+
+
+def _extract_findings_arg(resp: Any) -> Any:
+    """Pull the raw ``findings`` arg out of an AIMessage-like response.
+
+    Defensive against: missing ``.tool_calls``, empty/non-list tool_calls,
+    entries that are not dicts, missing/non-dict ``args``. Only a tool call
+    actually named ``submit_findings`` is honored (a stray call to some
+    other tool yields nothing). Never raises; returns whatever it finds
+    (passed on to normalize_rows, the sole coercion authority, which
+    itself never raises).
+    """
+    tool_calls = getattr(resp, "tool_calls", None)
+    if not isinstance(tool_calls, list) or not tool_calls:
+        return None
+
+    chosen = None
+    for tc in tool_calls:
+        if isinstance(tc, dict) and tc.get("name") == "submit_findings":
+            chosen = tc
+            break
+    if not isinstance(chosen, dict):
+        return None
+
+    args = chosen.get("args")
+    if not isinstance(args, dict):
+        return None
+    return args.get("findings")
+
+
+def finalize_findings(
+    holder: dict,
+    seed_text: str,
+    *,
+    model: str,
+    _model_factory=None,
+) -> list[dict]:
+    """Deterministic finalize guard: force a structured capture.
+
+    ISOLATED helper (P2): NOT wired into the orchestrator yet. When the
+    agentic loop finishes without a proper ``submit_findings`` call the
+    *holder* is empty. This makes ONE constrained model call forced (via
+    ``tool_choice``) to emit a ``submit_findings`` tool call, then reads
+    the structured arguments DIRECTLY off the response — it does NOT rely
+    on the agent loop or on tool-execution side effects.
+
+    No-op condition (documented choice): skip the model call ONLY when the
+    holder already holds a NON-EMPTY findings list AND ``submitted`` is
+    True. ``submitted`` True with an empty list still attempts the guard
+    (an early/empty submission is exactly the failure mode this guards).
+
+    NEVER raises: any failure (network, bad response shape, attribute
+    errors) degrades to recording the pre-existing findings (or ``[]``)
+    and marking submitted, so a finalize failure cannot abort the
+    pipeline.
+    """
+    if holder.get("submitted") is True:
+        existing = holder.get("findings")
+        if isinstance(existing, list) and existing:
+            return existing
+
+    try:
+        llm = (_model_factory or _default_chat)(model)
+        tool = make_submit_tool(holder)
+        bound = llm.bind_tools([tool], tool_choice="submit_findings")
+        messages = [
+            (
+                "human",
+                _FINALIZE_INSTRUCTION + "\n\n---\n" + (seed_text or ""),
+            )
+        ]
+        resp = bound.invoke(messages)
+        raw = _extract_findings_arg(resp)
+        rows = normalize_rows(raw)
+        holder["findings"] = rows
+        holder["submitted"] = True
+        return rows
+    except Exception:
+        # Degrade gracefully: never propagate. Preserve any pre-existing
+        # findings list; otherwise record zero rows.
+        fallback = holder.get("findings")
+        if not isinstance(fallback, list):
+            fallback = []
+        holder["findings"] = fallback
+        holder["submitted"] = True
+        return fallback
