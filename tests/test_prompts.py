@@ -37,3 +37,18 @@ def test_scanner_defines_json_output():
 def test_criteria_prompts_inject_their_key():
     for key, prompt in CRITERIA_PROMPTS.items():
         assert f'"criterion": "{key}"' in prompt
+
+
+def test_orchestrator_parallelizes_criteria_then_evaluator():
+    # P6: scanner first, the 4 criteria run in parallel in one turn,
+    # evaluator only after all four finish.
+    assert "병렬" in ORCHESTRATOR
+    assert "동시" in ORCHESTRATOR
+    # scanner must be instructed before the parallel-criteria dispatch.
+    scanner_idx = ORCHESTRATOR.index("scanner")
+    parallel_idx = ORCHESTRATOR.index("병렬")
+    assert scanner_idx < parallel_idx
+    # evaluator runs after all four criteria are done.
+    assert "네 개의 기준 subagent가 모두 끝난 후에만 evaluator" in ORCHESTRATOR
+    assert ORCHESTRATOR.index("모두 끝난 후") < ORCHESTRATOR.index(
+        "evaluator의 검증 결과")

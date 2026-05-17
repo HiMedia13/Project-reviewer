@@ -13,7 +13,10 @@ def test_build_agent_passes_subagents(monkeypatch):
         return "AGENT"
 
     monkeypatch.setattr(orch, "create_deep_agent", fake_create)
-    monkeypatch.setattr(orch, "ChatAnthropic", lambda **kw: "MODEL")
+    # Make the model identity observable so the hybrid wiring (Sonnet
+    # orchestrator vs Haiku subagents) is verifiable.
+    monkeypatch.setattr(
+        orch, "ChatAnthropic", lambda **kw: ("CHAT", kw.get("model")))
     agent, holder = orch.build_agent(repo_path="/x", in_scope=["a.py"])
     assert agent == "AGENT"
     assert holder == {}
@@ -27,7 +30,12 @@ def test_build_agent_passes_subagents(monkeypatch):
     for s in subs:
         assert s["system_prompt"]
         assert "prompt" not in s
-    assert captured["model"] == "MODEL"
+    # Hybrid model: orchestrator on the Sonnet model id, every subagent
+    # on the Haiku (REVIEWER_MODEL) id, and the two must actually differ.
+    assert captured["model"] == ("CHAT", orch.ORCH_MODEL_NAME)
+    for s in subs:
+        assert s["model"] == ("CHAT", orch.MODEL_NAME)
+    assert orch.ORCH_MODEL_NAME != orch.MODEL_NAME
 
     # submit_findings tool is wired into the orchestrator top-level tools
     # and the evaluator subagent's tools (only).
