@@ -30,12 +30,11 @@ def test_price_for_unknown_returns_none():
 
 
 def test_price_for_longest_prefix_match():
-    # Both "claude-haiku-4-5" and "claude-haiku" could match a haiku id;
-    # ensure the longest registered key wins (deterministic selection).
-    keys = sorted(MODEL_PRICES, key=len, reverse=True)
-    assert keys  # registry is non-empty
+    # A dated haiku id must resolve to the haiku-4-5 entry (longest
+    # matching registered prefix), not a shorter/wrong one.
     chosen = _price_for("claude-haiku-4-5-20251001")
     assert chosen == MODEL_PRICES["claude-haiku-4-5"]
+    assert _price_for("claude-opus-4-7") == MODEL_PRICES["claude-opus-4"]
 
 
 # --- phase transitions ---------------------------------------------------
@@ -226,3 +225,60 @@ def test_run_with_progress_disabled_no_callbacks():
 def test_phases_constant_shape():
     assert PHASES == ["scanner", "library", "eng",
                       "deadcode", "techstack", "evaluator"]
+
+
+class _FakeLive:
+    def __init__(self, renderable, **kwargs):
+        self.kwargs = kwargs
+        self.updates = 0
+        self.entered = False
+        self.exited = False
+
+    def __enter__(self):
+        self.entered = True
+        return self
+
+    def __exit__(self, *exc):
+        self.exited = True
+        return False
+
+    def update(self, renderable):
+        self.updates += 1
+
+
+class _EventAgent:
+    """Fake agent that fires one callback event during invoke."""
+
+    def __init__(self):
+        self.config = None
+
+    def invoke(self, payload, **kwargs):
+        self.config = kwargs.get("config")
+        handler = kwargs["config"]["callbacks"][0]
+        handler.on_tool_start({"name": "read_repo_file"},
+                              inputs={"path": "a.py"})
+        return {"messages": [type("M", (), {"content": "OUT"})()]}
+
+
+def test_run_with_progress_enabled_wires_handler_and_live():
+    agent = _EventAgent()
+    live_ref = {}
+
+    def factory(renderable, **kwargs):
+        live_ref["live"] = _FakeLive(renderable, **kwargs)
+        return live_ref["live"]
+
+    out = run_with_progress(agent, {"messages": []}, enabled=True,
+                            total_files=2, model="claude-haiku-4-5-20251001",
+                            _live_factory=factory)
+
+    assert out == "OUT"
+    live = live_ref["live"]
+    assert live.entered and live.exited            # context-managed
+    # config carried exactly one ReviewProgress callback
+    cbs = agent.config["callbacks"]
+    assert len(cbs) == 1 and isinstance(cbs[0], ReviewProgress)
+    # the wired handler is the live one: it recorded the simulated read
+    assert cbs[0].read_paths == {"a.py"}
+    # _on_change fired during the event + the final update in finally
+    assert live.updates >= 2

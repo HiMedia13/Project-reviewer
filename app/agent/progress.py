@@ -229,21 +229,27 @@ class ReviewProgress(BaseCallbackHandler):
 
 
 def run_with_progress(agent, payload: dict, *, enabled: bool,
-                      total_files: int, model: str) -> str:
+                      total_files: int, model: str,
+                      _live_factory=None) -> str:
     """Invoke *agent* with an optional live progress TUI.
 
     When ``enabled`` is False this is exactly ``agent.invoke(payload)`` —
     no handler, no callbacks, no Live (the unchanged non-TTY contract).
+
+    ``_live_factory`` is a test seam: a callable with the same signature
+    as ``rich.live.Live``; defaults to the real Live when enabled.
     """
     if not enabled:
         result = agent.invoke(payload)
         return result["messages"][-1].content
 
-    from rich.live import Live
+    if _live_factory is None:
+        from rich.live import Live
+        _live_factory = Live
 
     handler = ReviewProgress(total_files, model)
-    with Live(handler.render(), refresh_per_second=4,
-              transient=False) as live:
+    with _live_factory(handler.render(), refresh_per_second=4,
+                       transient=False) as live:
         handler._on_change = lambda: live.update(handler.render())
         try:
             result = agent.invoke(
