@@ -49,6 +49,20 @@ def run_evaluation(
     return rows, tech_assessment, raw
 
 
+def _prior_is_usable(conn, prior) -> bool:
+    """A prior evaluation is a valid incremental baseline only if it
+    actually produced something. A crashed/empty prior (no findings AND
+    no non-empty tech_assessment) must not suppress a fresh evaluation."""
+    if list(db.findings_for_evaluation(conn, prior["id"])):
+        return True
+    try:
+        o = json.loads(prior["overall_json"]) if prior["overall_json"] else {}
+    except (TypeError, ValueError):
+        o = {}
+    ta = o.get("tech_assessment") if isinstance(o, dict) else None
+    return bool(isinstance(ta, dict) and (ta.get("stack") or ta.get("purpose")))
+
+
 def review(remote_url: str, workdir: str, force: bool,
            max_files: int | None = None) -> dict:
     # Clamp negatives defensively: programmatic misuse (e.g. max_files=-1)
@@ -71,6 +85,12 @@ def review(remote_url: str, workdir: str, force: bool,
     repo_id = db.upsert_repo(conn, remote_url, repo_path, branch)
     prior = db.latest_evaluation(conn, repo_id)
     prior_sha = prior["commit_sha"] if prior else None
+    if prior is not None and not _prior_is_usable(conn, prior):
+        # The latest prior run produced nothing (crash/empty). Don't let
+        # incremental treat it as a baseline — that would skip evaluation
+        # and return the empty result forever. Start fresh (full).
+        prior = None
+        prior_sha = None
 
     scope = plan_scope(prior_sha, repo_path, all_files, force)
     eval_id = db.create_evaluation(

@@ -257,6 +257,91 @@ def test_run_evaluation_unpacks_run_agent_3tuple(tmp_path, monkeypatch):
     assert raw == "RAW"
 
 
+def test_failed_empty_prior_is_not_used_as_incremental_baseline(
+        tmp_path, monkeypatch):
+    # Reviewer P13: a crashed/empty prior eval (0 findings, no
+    # tech_assessment) left at HEAD sha must NOT be treated as an
+    # incremental baseline. Without the guard, run 2 (same sha, no
+    # force) goes incremental, finds 0 in-scope files, skips the agent
+    # and carries forward the empty prior forever (Overall: N/A).
+    origin = _origin(tmp_path)
+
+    # Run 1: an EMPTY failed result — no findings, empty tech_assessment.
+    def empty_run_eval(repo_path, in_scope):
+        return [], {}, "raw"
+
+    monkeypatch.setattr(cli, "run_evaluation", empty_run_eval)
+    monkeypatch.setattr(
+        cli, "aggregate_cost",
+        lambda **kw: {"input_tokens": 0, "output_tokens": 0,
+                      "cost_usd": 0.0, "run_url": None},
+    )
+    workdir = tmp_path / "wd"
+    cli.review(str(origin), workdir=str(workdir), force=False)
+
+    # Run 2: same sha (no new commit), no force. Non-empty fake that
+    # records its calls.
+    calls = []
+
+    def good_run_eval(repo_path, in_scope):
+        calls.append(list(in_scope))
+        return _fake_agent_rows(in_scope), dict(_FAKE_TECH), "raw"
+
+    monkeypatch.setattr(cli, "run_evaluation", good_run_eval)
+    cli.review(str(origin), workdir=str(workdir), force=False)
+
+    # The guard forced a FULL re-evaluation: run_evaluation WAS called
+    # (without the guard run 2 would skip and calls would be empty).
+    assert calls, "run 2 must invoke run_evaluation (full re-eval)"
+
+    db = cli.db.connect(str(Path(workdir) / "reviewer.sqlite3"))
+    repo = cli.db.get_repo_by_url(db, str(origin))
+    latest = cli.db.latest_evaluation(db, repo["id"])
+    rows = list(cli.db.findings_for_evaluation(db, latest["id"]))
+    assert rows, "latest eval must now have real findings"
+    overall = json.loads(latest["overall_json"])
+    assert overall["tech_assessment"]["stack_score"] == 80
+    # Guard forced full because the prior was unusable.
+    assert latest["mode"] == "full"
+
+
+def test_usable_prior_still_enables_incremental_skip(tmp_path, monkeypatch):
+    # Reviewer P13 regression: the guard must NOT over-trigger. A USABLE
+    # prior (real findings + tech_assessment) still enables the normal
+    # incremental no-change skip — run 2 must not re-run the agent.
+    origin = _origin(tmp_path)
+    calls = []
+
+    def fake_run_eval(repo_path, in_scope):
+        calls.append(list(in_scope))
+        return _fake_agent_rows(in_scope), dict(_FAKE_TECH), "raw"
+
+    monkeypatch.setattr(cli, "run_evaluation", fake_run_eval)
+    monkeypatch.setattr(
+        cli, "aggregate_cost",
+        lambda **kw: {"input_tokens": 1, "output_tokens": 1,
+                      "cost_usd": 0.0, "run_url": None},
+    )
+    workdir = tmp_path / "wd"
+
+    # Run 1: full run with a non-empty result at sha1.
+    cli.review(str(origin), workdir=str(workdir), force=True)
+    assert len(calls) == 1
+
+    # Run 2: no new commit, no force — usable prior so incremental skips.
+    cli.review(str(origin), workdir=str(workdir), force=False)
+    assert len(calls) == 1                          # no second agent run
+
+    db = cli.db.connect(str(Path(workdir) / "reviewer.sqlite3"))
+    repo = cli.db.get_repo_by_url(db, str(origin))
+    latest = cli.db.latest_evaluation(db, repo["id"])
+    overall = json.loads(latest["overall_json"])
+    assert latest["mode"] == "incremental"
+    # carried forward from run 1's usable prior, not emptied.
+    assert overall["tech_assessment"]["stack_score"] == 80
+    assert overall["tech_assessment"]["purpose"] == "P"
+
+
 def test_tech_assessment_carried_forward_on_no_agent_run(tmp_path,
                                                          monkeypatch):
     # Reviewer P10 follow-up: the carry-forward HAPPY path. Run 1 produces
