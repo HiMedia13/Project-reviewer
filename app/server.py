@@ -37,6 +37,8 @@ def create_app(db_path: str) -> FastAPI:
         repo = c.execute(
             "SELECT * FROM repos WHERE id=?", (repo_id,)
         ).fetchone()
+        if repo is None:
+            return HTMLResponse(f"repo {repo_id} not found", status_code=404)
         rows = c.execute(
             "SELECT * FROM evaluations WHERE repo_id=? ORDER BY id DESC",
             (repo_id,),
