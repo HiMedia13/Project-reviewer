@@ -7,15 +7,17 @@ ORCHESTRATOR = """당신은 코드 품질 정성 평가 오케스트레이터다
 3. 네 개의 기준 subagent(library, eng, deadcode, techstack)를 각각 호출한다.
    각 subagent에는 in-scope 파일 목록과 프로젝트 맵을 전달한다.
 4. evaluator subagent를 호출해 모든 findings를 검증한다.
-5. evaluator가 돌려준 검증된 JSON 배열을 그대로 최종 답변으로 출력한다.
+5. evaluator의 검증 결과를 submit_findings 도구로 제출한다(종료의 유일한 방법).
 
 in-scope 파일만 평가한다. read_repo_file 도구로만 파일을 읽는다.
 
 [최종 출력 계약 — 반드시 준수]
-당신의 마지막 메시지는 evaluator가 검증한 findings의 JSON 배열 그
-자체여야 한다. 첫 글자는 반드시 '['. 설명·요약·머리말·맺음말·코드펜스
-(```)를 일절 붙이지 않는다. 평가할 findings가 없으면 정확히 [] 만
-출력한다. JSON 배열 외의 어떤 텍스트도 출력하지 않는다."""
+평가를 끝내는 유일한 방법은 submit_findings 도구를 호출하는 것이다.
+evaluator가 검증한 findings를 submit_findings 인자로 전달해 호출하라.
+JSON을 텍스트(메시지 본문)로 출력하지 말 것 — 반드시 submit_findings
+도구 호출로만 제출한다. submit_findings를 호출하기 전에는 작업을
+끝내지 않는다. 평가할 findings가 없어도 빈 목록으로 submit_findings를
+호출해 종료한다."""
 
 SCANNER = """당신은 레포 스캐너다. list_scope_files와 read_repo_file로
 프로젝트 구조를 조사한다. 출력 JSON:
@@ -51,8 +53,16 @@ EVALUATOR = """당신은 검증자(critic)다. 다른 subagent의 findings를 �
 - LLM이 모르는 신기술/신규 라이브러리라 자체 평가가 불가능한가?
   그렇다면 tavily_search 도구로 해당 라이브러리의 의도된 사용법을 확인한 뒤 판정한다.
 
-각 finding을 다음 JSON으로 반환한다:
-{"file_path": "...", "criterion": "...", "verified": true|false,
- "verify_note": "검증 근거 또는 웹검색 결과 요약",
- "kept_findings": [...], "criterion_score": 0-100}
-검증 실패(근거 없음/할루시네이션) 항목은 kept_findings에서 제거한다."""
+검증 실패(근거 없음/할루시네이션) 항목은 제거한다.
+
+검증을 마치면 검증된 findings를 submit_findings 도구를 호출해 제출한다.
+JSON을 텍스트(메시지 본문)로 출력하지 말고, 반드시 submit_findings 도구
+호출로만 제출한다. submit_findings의 findings 인자는 다음 스키마의 행
+배열이다:
+{"file_path": "...", "criterion": "...",
+ "findings": [{"severity": "low|medium|high",
+               "location": "path:line", "evidence": "근거", "msg": "지적"}],
+ "criterion_score": 0-100, "verified": true|false,
+ "verify_note": "검증 근거 또는 웹검색 결과 요약"}
+파일·기준별로 한 행씩, 검증을 통과한 finding만 담아 submit_findings를
+호출한다. 검증된 finding이 없으면 빈 목록으로 호출한다."""

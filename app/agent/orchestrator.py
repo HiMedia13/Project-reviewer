@@ -8,6 +8,7 @@ from app.agent.prompts import (
 )
 from app.agent.tools import make_file_tools, make_tavily_tool
 from app.agent.progress import run_with_progress
+from app.agent.submit import make_submit_tool, finalize_findings
 
 MODEL_NAME = os.getenv("REVIEWER_MODEL", "claude-opus-4-7")
 # Safety bound on the orchestrator graph's supersteps so a runaway
@@ -19,6 +20,9 @@ def build_agent(repo_path: str, in_scope: list[str]):
     list_tool, read_tool = make_file_tools(repo_path, in_scope)
     tavily = make_tavily_tool()
     model = ChatAnthropic(model=MODEL_NAME, max_tokens=8000)
+
+    holder: dict = {}
+    submit_tool = make_submit_tool(holder)
 
     subagents = [
         {"name": "scanner", "description": "프로젝트 구조 스캐너",
@@ -35,15 +39,15 @@ def build_agent(repo_path: str, in_scope: list[str]):
         "name": "evaluator",
         "description": "findings 검증자(critic), 신기술은 웹검색",
         "system_prompt": EVALUATOR,
-        "tools": [read_tool, tavily],
+        "tools": [read_tool, tavily, submit_tool],
     })
 
     return create_deep_agent(
-        tools=[list_tool, read_tool],
+        tools=[list_tool, read_tool, submit_tool],
         system_prompt=ORCHESTRATOR,
         subagents=subagents,
         model=model,
-    )
+    ), holder
 
 
 def build_payload(in_scope: list[str]) -> dict:
@@ -55,11 +59,23 @@ def build_payload(in_scope: list[str]) -> dict:
     return {"messages": [{"role": "user", "content": msg}]}
 
 
-def run_agent(agent, in_scope: list[str], *, enabled: bool = False,
-              plain: bool = False) -> str:
-    return run_with_progress(
+def run_agent(agent, holder, in_scope: list[str], *, enabled: bool = False,
+              plain: bool = False) -> list[dict]:
+    raw = run_with_progress(
         agent, build_payload(in_scope),
         enabled=enabled, plain=plain,
         total_files=len(in_scope), model=MODEL_NAME,
         base_config={"recursion_limit": RECURSION_LIMIT},
     )
+    # Persist raw output so P4/main can write raw-<id>.txt for diagnostics.
+    holder["raw"] = raw if isinstance(raw, str) else repr(raw)
+
+    if (holder.get("submitted")
+            and isinstance(holder.get("findings"), list)
+            and holder["findings"]):
+        rows = holder["findings"]
+    else:
+        rows = finalize_findings(
+            holder, seed_text=holder.get("raw", ""), model=MODEL_NAME,
+        )
+    return rows

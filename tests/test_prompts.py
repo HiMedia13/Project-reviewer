@@ -14,13 +14,14 @@ def test_orchestrator_mentions_not_runtime():
     assert "scanner" in ORCHESTRATOR
 
 
-def test_orchestrator_enforces_json_array_final_output():
-    # Locks the final-output contract so the orchestrator returns the
-    # parseable JSON array, not a prose summary (root cause of a real
-    # zero-findings run).
-    assert "최종 출력 계약" in ORCHESTRATOR
-    assert "JSON 배열" in ORCHESTRATOR
-    assert "[" in ORCHESTRATOR and "코드펜스" in ORCHESTRATOR
+def test_orchestrator_enforces_submit_findings_contract():
+    # The final-output contract is now a tool call: finishing is only
+    # possible via submit_findings, and JSON must not be emitted as text
+    # (root cause of a real zero-findings run).
+    assert "submit_findings" in ORCHESTRATOR
+    assert "유일" in ORCHESTRATOR
+    assert "텍스트" in ORCHESTRATOR
+    assert "submit_findings" in EVALUATOR
 
 
 def test_evaluator_mentions_websearch_and_hallucination():
