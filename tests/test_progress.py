@@ -282,3 +282,29 @@ def test_run_with_progress_enabled_wires_handler_and_live():
     assert cbs[0].read_paths == {"a.py"}
     # _on_change fired during the event + the final update in finally
     assert live.updates >= 2
+
+
+def test_run_with_progress_disabled_passes_base_config():
+    agent = _FakeAgent()
+    out = run_with_progress(agent, {"messages": []}, enabled=False,
+                            total_files=3, model="claude-opus-4-7",
+                            base_config={"recursion_limit": 7})
+    assert out == "OUT"
+    assert agent.last_kwargs == {"config": {"recursion_limit": 7}}
+    assert agent.called_with_config is True
+
+
+def test_run_with_progress_plain_emits_and_wires(capsys):
+    agent = _EventAgent()
+    out = run_with_progress(agent, {"messages": []}, enabled=True,
+                            plain=True, total_files=2,
+                            model="claude-haiku-4-5-20251001",
+                            base_config={"recursion_limit": 5})
+    assert out == "OUT"
+    # base_config merged with the callbacks (no Live constructed)
+    cfg = agent.config
+    assert cfg["recursion_limit"] == 5
+    assert len(cfg["callbacks"]) == 1
+    assert isinstance(cfg["callbacks"][0], ReviewProgress)
+    captured = capsys.readouterr().out
+    assert "phase=" in captured and "files=" in captured

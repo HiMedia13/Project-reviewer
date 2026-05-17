@@ -24,8 +24,14 @@ load_dotenv()
 
 def run_evaluation(repo_path: str, in_scope: list[str]) -> str:
     from app.agent.orchestrator import build_agent, run_agent
+    # TTY -> Rich Live TUI; non-TTY stays suppressed unless --progress
+    # (REVIEWER_PROGRESS) forces plain one-line status into the log.
+    forced = os.getenv("REVIEWER_PROGRESS") == "1"
+    is_tty = sys.stdout.isatty()
+    enabled = is_tty or forced
+    plain = enabled and not is_tty
     agent = build_agent(repo_path, in_scope)
-    return run_agent(agent, in_scope)
+    return run_agent(agent, in_scope, enabled=enabled, plain=plain)
 
 
 def review(remote_url: str, workdir: str, force: bool) -> dict:
@@ -105,11 +111,15 @@ def main(argv=None) -> int:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--serve", action="store_true",
                         help="이력 탐색 웹 서버 실행")
+    parser.add_argument("--progress", action="store_true",
+                        help="진행상황 표시(비-TTY에서도 평문 한 줄 로그)")
     args = parser.parse_args(argv)
     if args.serve:
         from app.server import serve
         serve(str(Path(args.workdir) / "reviewer.sqlite3"))
         return 0
+    if args.progress:
+        os.environ["REVIEWER_PROGRESS"] = "1"
     review(args.github_url, args.workdir, args.force)
     return 0
 

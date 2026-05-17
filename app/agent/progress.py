@@ -228,32 +228,66 @@ class ReviewProgress(BaseCallbackHandler):
         return Group(header, phase_line, files_line, tokens_line, panel)
 
 
+def _plain_line(h: "ReviewProgress") -> str:
+    m, s = divmod(int(h.elapsed()), 60)
+    cost = h.cost_usd()
+    cost_s = "—" if cost is None else f"{cost:.4f}"
+    last = h.activity[-1] if h.activity else ""
+    return (f"[{m:02d}:{s:02d}] phase={h.current or '—'} "
+            f"files={len(h.read_paths)}/{h.total_files} "
+            f"tok={h.in_tokens}/{h.out_tokens} ~${cost_s} | {last}")
+
+
 def run_with_progress(agent, payload: dict, *, enabled: bool,
                       total_files: int, model: str,
+                      base_config: dict | None = None, plain: bool = False,
                       _live_factory=None) -> str:
-    """Invoke *agent* with an optional live progress TUI.
+    """Invoke *agent* with an optional live progress display.
 
-    When ``enabled`` is False this is exactly ``agent.invoke(payload)`` —
-    no handler, no callbacks, no Live (the unchanged non-TTY contract).
+    When ``enabled`` is False this is exactly ``agent.invoke(payload)``
+    (plus ``base_config`` if given) — no handler, no callbacks, no Live
+    (the unchanged non-TTY suppression contract).
 
-    ``_live_factory`` is a test seam: a callable with the same signature
-    as ``rich.live.Live``; defaults to the real Live when enabled.
+    ``base_config`` is merged into the invoke config in every path that
+    passes one (e.g. ``{"recursion_limit": N}``). ``plain`` renders
+    throttled one-line status to stdout instead of a Rich Live TUI, for
+    non-TTY logs (background/CI). ``_live_factory`` is a test seam.
     """
     if not enabled:
-        result = agent.invoke(payload)
+        if base_config:
+            result = agent.invoke(payload, config=base_config)
+        else:
+            result = agent.invoke(payload)
+        return result["messages"][-1].content
+
+    handler = ReviewProgress(total_files, model)
+    config = {**(base_config or {}), "callbacks": [handler]}
+
+    if plain:
+        state = {"phase": None, "n": 0}
+
+        def _emit():
+            state["n"] += 1
+            if handler.current != state["phase"] or state["n"] % 10 == 0:
+                state["phase"] = handler.current
+                print(_plain_line(handler), flush=True)
+
+        handler._on_change = _emit
+        try:
+            result = agent.invoke(payload, config=config)
+        finally:
+            print(_plain_line(handler), flush=True)
         return result["messages"][-1].content
 
     if _live_factory is None:
         from rich.live import Live
         _live_factory = Live
 
-    handler = ReviewProgress(total_files, model)
     with _live_factory(handler.render(), refresh_per_second=4,
                        transient=False) as live:
         handler._on_change = lambda: live.update(handler.render())
         try:
-            result = agent.invoke(
-                payload, config={"callbacks": [handler]})
+            result = agent.invoke(payload, config=config)
         finally:
             live.update(handler.render())
     return result["messages"][-1].content

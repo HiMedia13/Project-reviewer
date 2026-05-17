@@ -22,3 +22,25 @@ def test_build_agent_passes_subagents(monkeypatch):
         assert s["system_prompt"]
         assert "prompt" not in s
     assert captured["model"] == "MODEL"
+
+
+def test_run_agent_passes_through_to_progress(monkeypatch):
+    seen = {}
+
+    def fake_rwp(agent, payload, **kw):
+        seen["agent"] = agent
+        seen["payload"] = payload
+        seen.update(kw)
+        return "RESULT"
+
+    monkeypatch.setattr(orch, "run_with_progress", fake_rwp)
+    out = orch.run_agent("AGENT", ["a.py", "b.py"], enabled=True, plain=True)
+
+    assert out == "RESULT"
+    assert seen["agent"] == "AGENT"
+    assert seen["enabled"] is True and seen["plain"] is True
+    assert seen["total_files"] == 2
+    assert seen["model"] == orch.MODEL_NAME
+    assert seen["base_config"] == {"recursion_limit": orch.RECURSION_LIMIT}
+    content = seen["payload"]["messages"][0]["content"]
+    assert "a.py" in content and "b.py" in content
