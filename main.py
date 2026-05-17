@@ -89,6 +89,9 @@ def review(remote_url: str, workdir: str, force: bool,
         # The latest prior run produced nothing (crash/empty). Don't let
         # incremental treat it as a baseline — that would skip evaluation
         # and return the empty result forever. Start fresh (full).
+        # Trade-off: a genuinely empty repo (0 in-scope files) also looks
+        # "unusable" and re-runs full every time — acceptable, its cost
+        # is ~0 and we can't distinguish it from a crashed run.
         prior = None
         prior_sha = None
 

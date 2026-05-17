@@ -380,3 +380,40 @@ def test_tech_assessment_carried_forward_on_no_agent_run(tmp_path,
     # carried forward from run 1's overall_json, not empty
     assert overall["tech_assessment"]["stack_score"] == 80
     assert overall["tech_assessment"]["purpose"] == "P"
+
+
+def test_zero_findings_but_real_tech_assessment_prior_is_usable(
+        tmp_path, monkeypatch):
+    # A legit run that found ZERO file findings but produced a real
+    # project-level tech_assessment is still a USABLE baseline — the
+    # _prior_is_usable tech_assessment branch must keep incremental
+    # caching working (guard must not over-trigger on findings==0).
+    origin = _origin(tmp_path)
+    calls = []
+
+    def fake_run_eval(repo_path, in_scope):
+        calls.append(list(in_scope))
+        return [], dict(_FAKE_TECH), "<raw>"   # 0 findings, real tech
+
+    monkeypatch.setattr(cli, "run_evaluation", fake_run_eval)
+    monkeypatch.setattr(
+        cli, "aggregate_cost",
+        lambda **kw: {"input_tokens": 1, "output_tokens": 1,
+                      "cost_usd": 0.0, "run_url": None},
+    )
+    workdir = tmp_path / "wd"
+
+    cli.review(str(origin), workdir=str(workdir), force=True)
+    assert len(calls) == 1                           # run 1 evaluated
+
+    # Run 2: same sha, no force. Prior has 0 findings but a real
+    # tech_assessment -> usable -> incremental skip (NOT re-run full).
+    cli.review(str(origin), workdir=str(workdir), force=False)
+    assert len(calls) == 1                           # no second agent run
+
+    db = cli.db.connect(str(Path(workdir) / "reviewer.sqlite3"))
+    repo = cli.db.get_repo_by_url(db, str(origin))
+    latest = cli.db.latest_evaluation(db, repo["id"])
+    overall = json.loads(latest["overall_json"])
+    assert latest["mode"] == "incremental"
+    assert overall["tech_assessment"]["stack_score"] == 80
