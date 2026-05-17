@@ -7,9 +7,15 @@ ORCHESTRATOR = """당신은 코드 품질 정성 평가 오케스트레이터다
 3. 네 개의 기준 subagent(library, eng, deadcode, techstack)를 각각 호출한다.
    각 subagent에는 in-scope 파일 목록과 프로젝트 맵을 전달한다.
 4. evaluator subagent를 호출해 모든 findings를 검증한다.
-5. 검증된 결과를 JSON으로 최종 정리해 반환한다.
+5. evaluator가 돌려준 검증된 JSON 배열을 그대로 최종 답변으로 출력한다.
 
-in-scope 파일만 평가한다. read_repo_file 도구로만 파일을 읽는다."""
+in-scope 파일만 평가한다. read_repo_file 도구로만 파일을 읽는다.
+
+[최종 출력 계약 — 반드시 준수]
+당신의 마지막 메시지는 evaluator가 검증한 findings의 JSON 배열 그
+자체여야 한다. 첫 글자는 반드시 '['. 설명·요약·머리말·맺음말·코드펜스
+(```)를 일절 붙이지 않는다. 평가할 findings가 없으면 정확히 [] 만
+출력한다. JSON 배열 외의 어떤 텍스트도 출력하지 않는다."""
 
 SCANNER = """당신은 레포 스캐너다. list_scope_files와 read_repo_file로
 프로젝트 구조를 조사한다. 출력 JSON:

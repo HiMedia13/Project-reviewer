@@ -14,6 +14,15 @@ def test_orchestrator_mentions_not_runtime():
     assert "scanner" in ORCHESTRATOR
 
 
+def test_orchestrator_enforces_json_array_final_output():
+    # Locks the final-output contract so the orchestrator returns the
+    # parseable JSON array, not a prose summary (root cause of a real
+    # zero-findings run).
+    assert "최종 출력 계약" in ORCHESTRATOR
+    assert "JSON 배열" in ORCHESTRATOR
+    assert "[" in ORCHESTRATOR and "코드펜스" in ORCHESTRATOR
+
+
 def test_evaluator_mentions_websearch_and_hallucination():
     assert "할루시네이션" in EVALUATOR
     assert "tavily" in EVALUATOR.lower()

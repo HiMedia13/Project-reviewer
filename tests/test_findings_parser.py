@@ -25,3 +25,20 @@ def test_missing_fields_get_defaults():
     assert rows[0]["criterion_score"] is None
     assert rows[0]["verified"] is False
     assert rows[0]["findings"] == []
+
+
+def test_parses_content_block_list():
+    # Anthropic/LangChain may deliver content as a list of blocks
+    # instead of a string; it must still parse, not silently yield [].
+    raw = [{"type": "text",
+            "text": '[{"file_path":"a.py","criterion":"eng",'
+                    '"verified":true,"criterion_score":80}]'}]
+    rows = parse_findings(raw)
+    assert len(rows) == 1
+    assert rows[0]["file_path"] == "a.py"
+    assert rows[0]["verified"] is True
+
+
+def test_non_text_input_returns_empty_not_crash():
+    assert parse_findings(12345) == []
+    assert parse_findings(None) == []

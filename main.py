@@ -5,6 +5,16 @@ import time
 import uuid
 from pathlib import Path
 
+# Windows consoles default to a legacy codepage (e.g. cp949 on Korean
+# Windows) that cannot encode the report's em-dash / Korean text, which
+# crashes terminal output. Force UTF-8 and drop the unencodable rather
+# than abort.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 from app import db
 from app.repo_manager import (
     ensure_repo, head_sha, default_branch, inventory_files, file_hash,
@@ -66,6 +76,11 @@ def review(remote_url: str, workdir: str, force: bool) -> dict:
     started = time.time()
     if scope.in_scope:
         raw = run_evaluation(repo_path, scope.in_scope)
+        # Persist the raw agent output so a zero-findings parse can be
+        # diagnosed without paying for another full run.
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"raw-{eval_id}.txt").write_text(
+            raw if isinstance(raw, str) else repr(raw), encoding="utf-8")
         for r in parse_findings(raw):
             h = file_hash(str(Path(repo_path) / r["file_path"])) \
                 if (Path(repo_path) / r["file_path"]).exists() else ""

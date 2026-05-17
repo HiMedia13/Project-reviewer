@@ -15,9 +15,29 @@ def _extract_json(raw: str) -> str:
     return raw.strip()
 
 
-def parse_findings(raw: str) -> list[dict]:
+def _as_text(raw) -> str:
+    """Coerce an LLM message content to text.
+
+    LangChain/Anthropic message ``content`` may be a list of content
+    blocks (dicts with a ``text`` key) rather than a plain string;
+    extract and join the text so JSON extraction does not silently fail.
+    """
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list):
+        parts = []
+        for b in raw:
+            if isinstance(b, dict):
+                parts.append(str(b.get("text", "")))
+            else:
+                parts.append(str(b))
+        return "\n".join(parts)
+    return str(raw)
+
+
+def parse_findings(raw) -> list[dict]:
     try:
-        data = json.loads(_extract_json(raw))
+        data = json.loads(_extract_json(_as_text(raw)))
     except (json.JSONDecodeError, ValueError):
         return []
     if not isinstance(data, list):
