@@ -8,7 +8,9 @@ from app.agent.prompts import (
 )
 from app.agent.tools import make_file_tools, make_tavily_tool
 from app.agent.progress import run_with_progress
-from app.agent.submit import make_submit_tool, finalize_findings
+from app.agent.submit import (
+    make_submit_tool, finalize_findings, make_tech_tool, finalize_tech,
+)
 
 # Hybrid model: a stronger orchestrator (Sonnet) drives reliable, non-
 # thrashing tool-calling while the 6 subagents run on a cheap model
@@ -28,6 +30,7 @@ def build_agent(repo_path: str, in_scope: list[str]):
 
     holder: dict = {}
     submit_tool = make_submit_tool(holder)
+    tech_tool = make_tech_tool(holder)
 
     subagents = [
         {"name": "scanner", "description": "프로젝트 구조 스캐너",
@@ -39,19 +42,23 @@ def build_agent(repo_path: str, in_scope: list[str]):
             "name": crit,
             "description": f"{crit} 기준 평가자",
             "system_prompt": prompt,
-            "tools": [list_tool, read_tool],
+            # The project-level techstack subagent additionally gets the
+            # primary submit_tech_assessment tool; the other 3 criteria
+            # stay per-file (list/read only).
+            "tools": [list_tool, read_tool]
+            + ([tech_tool] if crit == "techstack" else []),
             "model": sub_model,
         })
     subagents.append({
         "name": "evaluator",
         "description": "findings 검증자(critic), 신기술은 웹검색",
         "system_prompt": EVALUATOR,
-        "tools": [read_tool, tavily, submit_tool],
+        "tools": [read_tool, tavily, submit_tool, tech_tool],
         "model": sub_model,
     })
 
     return create_deep_agent(
-        tools=[list_tool, read_tool, submit_tool],
+        tools=[list_tool, read_tool, submit_tool, tech_tool],
         system_prompt=ORCHESTRATOR,
         subagents=subagents,
         model=orch_model,
@@ -64,14 +71,16 @@ def build_payload(in_scope: list[str]) -> dict:
         "그 뒤 4개 기준(library/eng/deadcode/techstack)을 한 턴에서 병렬로 "
         "디스패치하며, 4개가 모두 끝난 뒤에만 evaluator를 실행하라. "
         "evaluator가 검증한 최종 결과를 submit_findings 도구를 호출해 "
-        "제출하라(종료의 유일한 방법). JSON을 메시지 본문으로 출력하지 "
-        "말 것.\n파일:\n" + "\n".join(in_scope)
+        "제출하라(종료의 유일한 방법). 또한 이 실행은 프로젝트 레벨 "
+        "기술스택 적합성 평가를 반드시 생성해 submit_tech_assessment "
+        "도구로 제출해야 한다(주(primary) 산출물). JSON을 메시지 본문으로 "
+        "출력하지 말 것.\n파일:\n" + "\n".join(in_scope)
     )
     return {"messages": [{"role": "user", "content": msg}]}
 
 
 def run_agent(agent, holder, in_scope: list[str], *, enabled: bool = False,
-              plain: bool = False) -> list[dict]:
+              plain: bool = False) -> tuple[list[dict], dict, str]:
     # The live cost meter approximates over the subagent (Haiku) token bulk
     # via MODEL_NAME; the orchestrator now runs on Sonnet, so the live `~$`
     # under-counts orchestrator tokens — authoritative cost is LangSmith.
@@ -92,4 +101,19 @@ def run_agent(agent, holder, in_scope: list[str], *, enabled: bool = False,
         rows = finalize_findings(
             holder, seed_text=holder.get("raw", ""), model=MODEL_NAME,
         )
-    return rows
+
+    # Resolve the PRIMARY deliverable. The tech finalize fallback uses
+    # ORCH_MODEL_NAME (Sonnet), not the cheap Haiku: it is the primary
+    # product output and a single forced call, so reliability matters
+    # more than the Haiku price here.
+    if (holder.get("tech_submitted")
+            and isinstance(holder.get("tech_assessment"), dict)
+            and (holder["tech_assessment"].get("stack")
+                 or holder["tech_assessment"].get("purpose"))):
+        ta = holder["tech_assessment"]
+    else:
+        ta = finalize_tech(
+            holder, seed_text=holder.get("raw", ""),
+            model=ORCH_MODEL_NAME,
+        )
+    return rows, ta, holder.get("raw", "")
