@@ -1,7 +1,11 @@
+import json
 import subprocess
 from pathlib import Path
 
 import main as cli
+
+_FAKE_TECH = {"purpose": "P", "stack": [{"tech": "Python"}],
+              "stack_verdict": "ok", "stack_score": 80}
 
 
 def _origin(tmp_path):
@@ -44,7 +48,7 @@ def test_full_then_incremental_reuses_cache(tmp_path, monkeypatch):
 
     def fake_run_eval(repo_path, in_scope):
         calls.append(list(in_scope))
-        return _fake_agent_rows(in_scope), "<raw agent text>"
+        return _fake_agent_rows(in_scope), dict(_FAKE_TECH), "<raw agent text>"
 
     monkeypatch.setattr(cli, "run_evaluation", fake_run_eval)
     monkeypatch.setattr(
@@ -83,7 +87,7 @@ def test_max_files_caps_evaluation(tmp_path, monkeypatch):
 
     def fake_run_eval(repo_path, in_scope):
         calls.append(list(in_scope))
-        return _fake_agent_rows(in_scope), "<raw agent text>"
+        return _fake_agent_rows(in_scope), dict(_FAKE_TECH), "<raw agent text>"
 
     monkeypatch.setattr(cli, "run_evaluation", fake_run_eval)
     monkeypatch.setattr(
@@ -117,7 +121,7 @@ def test_max_files_zero_evaluates_nothing(tmp_path, monkeypatch):
 
     def fake_run_eval(repo_path, in_scope):
         calls.append(list(in_scope))
-        return _fake_agent_rows(in_scope), "<raw agent text>"
+        return _fake_agent_rows(in_scope), dict(_FAKE_TECH), "<raw agent text>"
 
     monkeypatch.setattr(cli, "run_evaluation", fake_run_eval)
     monkeypatch.setattr(
@@ -150,7 +154,7 @@ def test_max_files_preserves_cached_findings(tmp_path, monkeypatch):
 
     def fake_run_eval(repo_path, in_scope):
         calls.append(list(in_scope))
-        return _fake_agent_rows(in_scope), "<raw agent text>"
+        return _fake_agent_rows(in_scope), dict(_FAKE_TECH), "<raw agent text>"
 
     monkeypatch.setattr(cli, "run_evaluation", fake_run_eval)
     monkeypatch.setattr(
@@ -185,3 +189,69 @@ def test_max_files_preserves_cached_findings(tmp_path, monkeypatch):
     paths = {r["file_path"] for r in rows}
     assert paths == {"a.py", "b.py"}                # a.py reused from cache
     assert latest["mode"] == "incremental"
+
+
+def test_tech_assessment_persisted_in_overall_json(tmp_path, monkeypatch):
+    origin = _origin(tmp_path)
+
+    def fake_run_eval(repo_path, in_scope):
+        return _fake_agent_rows(in_scope), dict(_FAKE_TECH), "<raw>"
+
+    monkeypatch.setattr(cli, "run_evaluation", fake_run_eval)
+    monkeypatch.setattr(
+        cli, "aggregate_cost",
+        lambda **kw: {"input_tokens": 1, "output_tokens": 1,
+                      "cost_usd": 0.0, "run_url": None},
+    )
+    workdir = tmp_path / "wd"
+
+    cli.review(str(origin), workdir=str(workdir), force=True)
+
+    db = cli.db.connect(str(Path(workdir) / "reviewer.sqlite3"))
+    repo = cli.db.get_repo_by_url(db, str(origin))
+    latest = cli.db.latest_evaluation(db, repo["id"])
+    overall = json.loads(latest["overall_json"])
+
+    # The tech assessment round-trips through finalize_evaluation's
+    # overall_json json.dumps with no DB schema change.
+    assert overall["tech_assessment"]["stack_score"] == 80
+    assert overall["tech_assessment"]["purpose"] == "P"
+    # synthesize's SECONDARY 4-criteria summary stays intact alongside it.
+    assert "score" in overall
+    assert "criteria" in overall
+
+
+def test_run_evaluation_unpacks_run_agent_3tuple(tmp_path, monkeypatch):
+    # Reviewer M1: exercise the REAL run_agent<->main seam (the pipeline
+    # tests above stub cli.run_evaluation, so the arity contract between
+    # run_agent and run_evaluation is otherwise untested). Patch at the
+    # orchestrator import boundary used INSIDE run_evaluation; build_agent
+    # / run_agent are imported there lazily, so patching the module attrs
+    # before the call takes effect.
+    import app.agent.orchestrator as orch
+
+    monkeypatch.setattr(orch, "build_agent", lambda rp, sc: ("AGENT", {}))
+    monkeypatch.setattr(
+        orch, "run_agent",
+        lambda agent, holder, in_scope, *, enabled, plain: (
+            [{"file_path": "a.py", "criterion": "eng", "findings": [],
+              "criterion_score": 80, "verified": True, "verify_note": ""}],
+            {"purpose": "P", "stack": [], "stack_verdict": "v",
+             "stack_score": 70},
+            "RAW",
+        ),
+    )
+
+    result = cli.run_evaluation("/x", ["a.py"])
+
+    assert isinstance(result, tuple) and len(result) == 3
+    rows, tech, raw = result
+    # First element is the LIST of dict rows (NOT a nested tuple): this is
+    # exactly the C1 regression guard (main.py must unpack run_agent's
+    # 3-arity, not bind the whole tuple to `rows`).
+    assert isinstance(rows, list)
+    assert rows and isinstance(rows[0], dict)
+    assert rows[0]["file_path"] == "a.py"
+    assert tech == {"purpose": "P", "stack": [], "stack_verdict": "v",
+                    "stack_score": 70}
+    assert raw == "RAW"

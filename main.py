@@ -33,7 +33,7 @@ load_dotenv()
 
 def run_evaluation(
     repo_path: str, in_scope: list[str]
-) -> tuple[list[dict], str]:
+) -> tuple[list[dict], dict, str]:
     from app.agent.orchestrator import build_agent, run_agent
     # TTY -> Rich Live TUI; non-TTY stays suppressed unless --progress
     # (REVIEWER_PROGRESS) forces plain one-line status into the log.
@@ -42,9 +42,10 @@ def run_evaluation(
     enabled = is_tty or forced
     plain = enabled and not is_tty
     agent, holder = build_agent(repo_path, in_scope)
-    rows = run_agent(agent, holder, in_scope, enabled=enabled, plain=plain)
-    raw = holder.get("raw", "")
-    return rows, raw
+    rows, tech_assessment, raw = run_agent(
+        agent, holder, in_scope, enabled=enabled, plain=plain
+    )
+    return rows, tech_assessment, raw
 
 
 def review(remote_url: str, workdir: str, force: bool,
@@ -90,8 +91,13 @@ def review(remote_url: str, workdir: str, force: bool,
     trace_id = str(uuid.uuid4())
     os.environ.setdefault("LANGSMITH_PROJECT", "project-reviewer")
     started = time.time()
+    # The project-level tech assessment (normalize_tech_assessment shape):
+    # set from this run's agent output, or carried forward from the prior
+    # evaluation when no agent runs (incremental no-change / dry-run) so
+    # the report/persistence is not silently emptied.
+    tech_assessment: dict = {}
     if eval_files:
-        rows, raw = run_evaluation(repo_path, eval_files)
+        rows, tech_assessment, raw = run_evaluation(repo_path, eval_files)
         # Persist the raw agent output so a zero-findings parse can be
         # diagnosed without paying for another full run.
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -105,10 +111,29 @@ def review(remote_url: str, workdir: str, force: bool,
                 r["findings"], r["criterion_score"], r["verified"],
                 r["verify_note"],
             )
+    else:
+        # No agent run: carry the prior evaluation's tech assessment
+        # forward. prior may be None and overall_json may be
+        # None/invalid/missing the key — degrade to {} on any failure,
+        # never raise.
+        import json as _cf_json
+        try:
+            parsed = _cf_json.loads(prior["overall_json"])
+            tech_assessment = (
+                parsed.get("tech_assessment", {})
+                if isinstance(parsed, dict) else {}
+            )
+        except (TypeError, ValueError, KeyError):
+            tech_assessment = {}
     duration = time.time() - started
 
     all_rows = list(db.findings_for_evaluation(conn, eval_id))
     overall = synthesize(all_rows)
+    # Embed the project-level tech assessment into the overall dict so it
+    # round-trips through finalize_evaluation's overall_json json.dumps
+    # with NO DB schema change. synthesize's {"score","criteria"} stays
+    # as the SECONDARY 4-criteria summary, untouched.
+    overall["tech_assessment"] = tech_assessment
     cost = aggregate_cost(
         trace_id=trace_id, project=os.environ["LANGSMITH_PROJECT"]
     )
@@ -118,6 +143,7 @@ def review(remote_url: str, workdir: str, force: bool,
     ctx = {
         "repo_url": remote_url, "commit_sha": sha, "mode": scope.mode,
         "overall": overall, "cost": cost, "duration_sec": duration,
+        "tech_assessment": tech_assessment,
         "changed_files": eval_files,
         "findings": [
             {"file_path": r["file_path"], "criterion": r["criterion"],

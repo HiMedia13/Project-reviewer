@@ -66,6 +66,10 @@ def test_criteria_prompts_inject_their_key():
     assert "submit_tech_assessment" in techstack
     assert "목적" in techstack
     assert "JSON" in techstack
+    # Reviewer M2: guard against a future edit reintroducing a per-file
+    # row schema — techstack is strictly PROJECT-LEVEL.
+    assert '"file_path"' not in techstack
+    assert "프로젝트 전체" in techstack
 
 
 def test_orchestrator_parallelizes_criteria_then_evaluator():
