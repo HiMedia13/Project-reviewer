@@ -49,6 +49,11 @@ def run_evaluation(
 
 def review(remote_url: str, workdir: str, force: bool,
            max_files: int | None = None) -> dict:
+    # Clamp negatives defensively: programmatic misuse (e.g. max_files=-1)
+    # would otherwise negative-slice scope.in_scope surprisingly. Treat it
+    # as "evaluate nothing" rather than guessing intent.
+    if max_files is not None and max_files < 0:
+        max_files = 0
     work = Path(workdir)
     work.mkdir(parents=True, exist_ok=True)
     cache_root = str(work / ".repocache")
@@ -76,8 +81,11 @@ def review(remote_url: str, workdir: str, force: bool,
         )
 
     # --max-files caps only what the agent re-evaluates; cache reuse
-    # (scope.cached / copy_unchanged_findings) is unaffected.
-    eval_files = scope.in_scope[:max_files] if max_files else scope.in_scope
+    # (scope.cached / copy_unchanged_findings) is unaffected. `is not None`
+    # (not truthiness) so max_files=0 means "evaluate nothing" (dry-run),
+    # not "no cap".
+    eval_files = (scope.in_scope[:max_files]
+                  if max_files is not None else scope.in_scope)
 
     trace_id = str(uuid.uuid4())
     os.environ.setdefault("LANGSMITH_PROJECT", "project-reviewer")
@@ -127,6 +135,14 @@ def review(remote_url: str, workdir: str, force: bool,
     return ctx
 
 
+def _nonneg_int(v: str) -> int:
+    """argparse type: a non-negative int (0 = dry-run / evaluate nothing)."""
+    n = int(v)
+    if n < 0:
+        raise argparse.ArgumentTypeError("음수는 허용되지 않습니다(>= 0)")
+    return n
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Project-Reviewer")
     parser.add_argument("github_url", nargs="?")
@@ -136,7 +152,7 @@ def main(argv=None) -> int:
                         help="이력 탐색 웹 서버 실행")
     parser.add_argument("--progress", action="store_true",
                         help="진행상황 표시(비-TTY에서도 평문 한 줄 로그)")
-    parser.add_argument("--max-files", type=int, default=None,
+    parser.add_argument("--max-files", type=_nonneg_int, default=None,
                         help="평가할 in-scope 파일 수 상한(검증용 저비용 실행)")
     args = parser.parse_args(argv)
     if args.serve:
