@@ -105,3 +105,15 @@ def test_run_agent_uses_holder_findings_when_submitted(monkeypatch):
 
     assert out == [{"file_path": "x"}]
     assert holder["raw"] == "RESULT"
+
+
+def test_build_payload_consistent_with_parallel_contract():
+    # The user-turn message must not contradict the system prompt's
+    # parallel-dispatch contract (the P3/P6 prompt-vs-payload bug class).
+    content = orch.build_payload(["a.py", "b.py"])["messages"][0]["content"]
+    assert "병렬" in content                       # criteria run in parallel
+    assert "submit_findings" in content            # terminate via the tool
+    assert "scanner" in content                    # scanner first
+    # the old "scanner → 4기준 → evaluator 순으로" ordering is gone
+    assert "순으로" not in content
+    assert "a.py" in content and "b.py" in content

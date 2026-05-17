@@ -14,7 +14,7 @@ from app.agent.submit import make_submit_tool, finalize_findings
 # thrashing tool-calling while the 6 subagents run on a cheap model
 # (Haiku via REVIEWER_MODEL in .env) for the token-heavy bulk work.
 ORCH_MODEL_NAME = os.getenv("REVIEWER_ORCH_MODEL", "claude-sonnet-4-6")
-MODEL_NAME = os.getenv("REVIEWER_MODEL", "claude-opus-4-7")
+MODEL_NAME = os.getenv("REVIEWER_MODEL", "claude-haiku-4-5-20251001")
 # Safety bound on the orchestrator graph's supersteps so a runaway
 # multi-agent loop terminates instead of burning tokens indefinitely.
 RECURSION_LIMIT = int(os.getenv("REVIEWER_RECURSION_LIMIT", "60"))
@@ -60,10 +60,12 @@ def build_agent(repo_path: str, in_scope: list[str]):
 
 def build_payload(in_scope: list[str]) -> dict:
     msg = (
-        "다음 in-scope 파일들을 평가하라. 워크플로우대로 scanner → 4기준 → "
-        "evaluator 순으로 진행하고, evaluator가 검증한 최종 결과를 "
-        "submit_findings 도구를 호출해 제출하라(종료의 유일한 방법). "
-        "JSON을 메시지 본문으로 출력하지 말 것.\n파일:\n" + "\n".join(in_scope)
+        "다음 in-scope 파일들을 평가하라. scanner를 가장 먼저 단독 실행하고, "
+        "그 뒤 4개 기준(library/eng/deadcode/techstack)을 한 턴에서 병렬로 "
+        "디스패치하며, 4개가 모두 끝난 뒤에만 evaluator를 실행하라. "
+        "evaluator가 검증한 최종 결과를 submit_findings 도구를 호출해 "
+        "제출하라(종료의 유일한 방법). JSON을 메시지 본문으로 출력하지 "
+        "말 것.\n파일:\n" + "\n".join(in_scope)
     )
     return {"messages": [{"role": "user", "content": msg}]}
 
