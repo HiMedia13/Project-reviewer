@@ -33,7 +33,7 @@ def make_file_tools(repo_path: str, in_scope: list[str]):
         if path not in scope:
             return f"ERROR: '{path}' is not in scope."
         target = (root / path).resolve()
-        if os.path.commonpath([str(root), str(target)]) != str(root):
+        if not target.is_relative_to(root):
             return f"ERROR: '{path}' is not in scope (path traversal)."
         try:
             return target.read_text(encoding="utf-8", errors="ignore")
