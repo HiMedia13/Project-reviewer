@@ -19,6 +19,7 @@ for _s in (sys.stdout, sys.stderr):
 from app import db
 from app.repo_manager import (
     ensure_repo, head_sha, default_branch, inventory_files, file_hash,
+    exclude_frontend,
 )
 from app.scope import plan_scope
 from app.synthesizer import synthesize
@@ -64,7 +65,8 @@ def _prior_is_usable(conn, prior) -> bool:
 
 
 def review(remote_url: str, workdir: str, force: bool,
-           max_files: int | None = None) -> dict:
+           max_files: int | None = None,
+           with_frontend: bool = False) -> dict:
     # Clamp negatives defensively: programmatic misuse (e.g. max_files=-1)
     # would otherwise negative-slice scope.in_scope surprisingly. Treat it
     # as "evaluate nothing" rather than guessing intent.
@@ -79,6 +81,12 @@ def review(remote_url: str, workdir: str, force: bool,
     sha = head_sha(repo_path)
     branch = default_branch(repo_path)
     all_files = inventory_files(repo_path)
+    # Backend-focused by default: drop heuristically-frontend files before
+    # scope/cache so they are never evaluated nor cached. --with-frontend
+    # keeps the full inventory. Filtering here (not in scope) keeps the
+    # incremental diff/cache consistent with what is actually evaluated.
+    if not with_frontend:
+        all_files = exclude_frontend(all_files)
 
     conn = db.connect(str(work / "reviewer.sqlite3"))
     db.init_schema(conn)
@@ -202,6 +210,9 @@ def main(argv=None) -> int:
                         help="진행상황 표시(비-TTY에서도 평문 한 줄 로그)")
     parser.add_argument("--max-files", type=_nonneg_int, default=None,
                         help="평가할 in-scope 파일 수 상한(검증용 저비용 실행)")
+    parser.add_argument("--with-frontend", action="store_true",
+                        help="프론트엔드/UI 파일도 평가에 포함"
+                             "(기본: 백엔드 중심으로 자동 제외)")
     args = parser.parse_args(argv)
     if args.serve:
         from app.server import serve
@@ -210,7 +221,7 @@ def main(argv=None) -> int:
     if args.progress:
         os.environ["REVIEWER_PROGRESS"] = "1"
     review(args.github_url, args.workdir, args.force,
-           max_files=args.max_files)
+           max_files=args.max_files, with_frontend=args.with_frontend)
     return 0
 
 

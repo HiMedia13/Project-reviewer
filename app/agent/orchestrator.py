@@ -89,9 +89,20 @@ def run_agent(agent, holder, in_scope: list[str], *, enabled: bool = False,
         enabled=enabled, plain=plain,
         total_files=len(in_scope), model=MODEL_NAME,
         base_config={"recursion_limit": RECURSION_LIMIT},
+        interrupt_holder=holder,
     )
     # Persist raw output so P4/main can write raw-<id>.txt for diagnostics.
     holder["raw"] = raw if isinstance(raw, str) else repr(raw)
+
+    # Graceful Ctrl+C: persist ONLY what subagents already submitted. Skip
+    # the finalize_* fallbacks entirely — they make a forced LLM call, and
+    # the whole point of the interrupt is to stop spending.
+    if holder.get("interrupted"):
+        rows = (holder["findings"]
+                if isinstance(holder.get("findings"), list) else [])
+        ta = (holder["tech_assessment"]
+              if isinstance(holder.get("tech_assessment"), dict) else {})
+        return rows, ta, holder.get("raw", "")
 
     if (holder.get("submitted")
             and isinstance(holder.get("findings"), list)

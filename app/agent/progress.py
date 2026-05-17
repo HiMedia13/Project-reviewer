@@ -10,11 +10,74 @@ no callbacks attached, no Rich Live.
 """
 
 import collections
+import os
+import sys
 import time
 
 from langchain_core.callbacks import BaseCallbackHandler
 
 PHASES = ["scanner", "library", "eng", "deadcode", "techstack", "evaluator"]
+
+
+class ReviewInterrupted(KeyboardInterrupt):
+    """Raised cooperatively after a graceful Ctrl+C so the run unwinds at
+    the next agent step boundary. Subclasses KeyboardInterrupt so that if
+    it is ever left uncaught it still aborts (and the existing
+    ``except Exception`` guards do NOT swallow it)."""
+
+
+class _InterruptState:
+    """Ctrl+C state machine: 1st press → graceful, 2nd → hard kill.
+
+    ``signal()`` is called from the SIGINT handler; ``requested`` is polled
+    cooperatively by the progress callback to raise at a safe boundary.
+    """
+
+    def __init__(self):
+        self.requested = False
+        self._presses = 0
+
+    def signal(self) -> str:
+        self._presses += 1
+        if self._presses >= 2:
+            return "hard"
+        self.requested = True
+        return "graceful"
+
+
+def _install_sigint(state: "_InterruptState"):
+    """Install a SIGINT handler implementing the two-press contract.
+
+    Returns a ``restore`` callable (always safe to call). No-ops when not
+    on the main thread or signals are unavailable (e.g. under pytest in a
+    worker), so test/embedded use never alters process signal state.
+    """
+    try:
+        import signal
+        import threading
+
+        if threading.current_thread() is not threading.main_thread():
+            return lambda: None
+        prev = signal.getsignal(signal.SIGINT)
+
+        def _handler(_signum, _frame):
+            if state.signal() == "hard":
+                try:
+                    signal.signal(signal.SIGINT, prev)
+                except (ValueError, OSError, TypeError):
+                    pass
+                print("\n강제 종료합니다.", file=sys.stderr, flush=True)
+                os._exit(130)
+            print(
+                "\n⚠ 중단 요청됨 — 현재 단계까지 마무리하고 부분 결과를 "
+                "저장합니다. 즉시 강제 종료하려면 Ctrl+C 한 번 더.",
+                file=sys.stderr, flush=True,
+            )
+
+        signal.signal(signal.SIGINT, _handler)
+        return lambda: signal.signal(signal.SIGINT, prev)
+    except (ValueError, OSError, ImportError):
+        return lambda: None
 
 # Approximate USD per 1M tokens (input, output), keyed by model-id prefix.
 # Longest matching prefix wins; see _price_for. These are best-effort
@@ -60,8 +123,17 @@ class ReviewProgress(BaseCallbackHandler):
             maxlen=max_log)
         # Optional hook invoked after state changes (used to refresh Live).
         self._on_change = None
+        # Optional cooperative-interrupt state (set by run_with_progress).
+        self._interrupt: _InterruptState | None = None
 
     # -- helpers ----------------------------------------------------------
+
+    def _check_interrupt(self):
+        """Raise ReviewInterrupted at this step boundary if a graceful
+        Ctrl+C was requested. Called at the start of every callback so the
+        run stops within one agent step of the keypress."""
+        if self._interrupt is not None and self._interrupt.requested:
+            raise ReviewInterrupted()
 
     def _notify(self):
         if self._on_change is not None:
@@ -93,8 +165,14 @@ class ReviewProgress(BaseCallbackHandler):
 
     # -- callbacks --------------------------------------------------------
 
+    def on_chain_start(self, serialized, inputs, **kwargs):
+        # Finest-grained boundary: lets a graceful stop land between LLM
+        # calls even if no tool runs in between. Must not record state.
+        self._check_interrupt()
+
     def on_tool_start(self, serialized, input_str=None, *,
                       inputs=None, **kwargs):
+        self._check_interrupt()
         try:
             name = (serialized or {}).get("name")
             args = self._resolve_args(input_str, inputs)
@@ -131,6 +209,7 @@ class ReviewProgress(BaseCallbackHandler):
         return None
 
     def on_llm_end(self, response, **kwargs):
+        self._check_interrupt()
         try:
             inp, out = self._extract_usage(response)
             self.in_tokens += inp
@@ -241,7 +320,8 @@ def _plain_line(h: "ReviewProgress") -> str:
 def run_with_progress(agent, payload: dict, *, enabled: bool,
                       total_files: int, model: str,
                       base_config: dict | None = None, plain: bool = False,
-                      _live_factory=None) -> str:
+                      _live_factory=None,
+                      interrupt_holder: dict | None = None) -> str:
     """Invoke *agent* with an optional live progress display.
 
     When ``enabled`` is False this is exactly ``agent.invoke(payload)``
@@ -252,42 +332,70 @@ def run_with_progress(agent, payload: dict, *, enabled: bool,
     passes one (e.g. ``{"recursion_limit": N}``). ``plain`` renders
     throttled one-line status to stdout instead of a Rich Live TUI, for
     non-TTY logs (background/CI). ``_live_factory`` is a test seam.
+
+    A SIGINT (Ctrl+C) handler is installed for the duration: the first
+    press requests a graceful stop (the progress callback raises
+    ``ReviewInterrupted`` at the next agent step boundary); a second press
+    hard-kills the process. On a graceful stop this returns ``""`` and
+    sets ``interrupt_holder["interrupted"] = True`` so the caller persists
+    whatever partial results were already submitted without paying for a
+    finalize LLM call.
     """
-    if not enabled:
-        if base_config:
-            result = agent.invoke(payload, config=base_config)
-        else:
-            result = agent.invoke(payload)
-        return result["messages"][-1].content
+    istate = _InterruptState()
+    restore = _install_sigint(istate)
 
-    handler = ReviewProgress(total_files, model)
-    config = {**(base_config or {}), "callbacks": [handler]}
+    def _partial() -> str:
+        if interrupt_holder is not None:
+            interrupt_holder["interrupted"] = True
+        return ""
 
-    if plain:
-        state = {"phase": None, "n": 0}
+    try:
+        if not enabled:
+            try:
+                if base_config:
+                    result = agent.invoke(payload, config=base_config)
+                else:
+                    result = agent.invoke(payload)
+            except ReviewInterrupted:
+                return _partial()
+            return result["messages"][-1].content
 
-        def _emit():
-            state["n"] += 1
-            if handler.current != state["phase"] or state["n"] % 10 == 0:
-                state["phase"] = handler.current
+        handler = ReviewProgress(total_files, model)
+        handler._interrupt = istate
+        config = {**(base_config or {}), "callbacks": [handler]}
+
+        if plain:
+            state = {"phase": None, "n": 0}
+
+            def _emit():
+                state["n"] += 1
+                if handler.current != state["phase"] or state["n"] % 10 == 0:
+                    state["phase"] = handler.current
+                    print(_plain_line(handler), flush=True)
+
+            handler._on_change = _emit
+            try:
+                result = agent.invoke(payload, config=config)
+            except ReviewInterrupted:
+                return _partial()
+            finally:
                 print(_plain_line(handler), flush=True)
+            return result["messages"][-1].content
 
-        handler._on_change = _emit
+        if _live_factory is None:
+            from rich.live import Live
+            _live_factory = Live
+
         try:
-            result = agent.invoke(payload, config=config)
-        finally:
-            print(_plain_line(handler), flush=True)
+            with _live_factory(handler.render(), refresh_per_second=4,
+                               transient=False) as live:
+                handler._on_change = lambda: live.update(handler.render())
+                try:
+                    result = agent.invoke(payload, config=config)
+                finally:
+                    live.update(handler.render())
+        except ReviewInterrupted:
+            return _partial()
         return result["messages"][-1].content
-
-    if _live_factory is None:
-        from rich.live import Live
-        _live_factory = Live
-
-    with _live_factory(handler.render(), refresh_per_second=4,
-                       transient=False) as live:
-        handler._on_change = lambda: live.update(handler.render())
-        try:
-            result = agent.invoke(payload, config=config)
-        finally:
-            live.update(handler.render())
-    return result["messages"][-1].content
+    finally:
+        restore()

@@ -417,3 +417,76 @@ def test_zero_findings_but_real_tech_assessment_prior_is_usable(
     overall = json.loads(latest["overall_json"])
     assert latest["mode"] == "incremental"
     assert overall["tech_assessment"]["stack_score"] == 80
+
+
+def _origin_mixed(tmp_path):
+    """A repo with backend (.py/.go) and frontend (.tsx + frontend/ js)."""
+    o = tmp_path / "origin"
+    o.mkdir()
+    run = lambda *a: subprocess.run(a, cwd=o, check=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@t")
+    run("git", "config", "user.name", "t")
+    (o / "server.py").write_text("x = 1\n")
+    (o / "svc.go").write_text("package main\n")
+    fe = o / "frontend"
+    fe.mkdir()
+    (fe / "App.tsx").write_text("export default 1\n")
+    (fe / "index.js").write_text("console.log(1)\n")
+    run("git", "add", ".")
+    run("git", "commit", "-qm", "c1")
+    return o
+
+
+def _patch_eval(monkeypatch, calls):
+    def fake_run_eval(repo_path, in_scope):
+        calls.append(sorted(in_scope))
+        return _fake_agent_rows(in_scope), dict(_FAKE_TECH), "<raw>"
+
+    monkeypatch.setattr(cli, "run_evaluation", fake_run_eval)
+    monkeypatch.setattr(
+        cli, "aggregate_cost",
+        lambda **kw: {"input_tokens": 1, "output_tokens": 1,
+                      "cost_usd": 0.0, "run_url": None},
+    )
+
+
+def test_frontend_excluded_by_default(tmp_path, monkeypatch):
+    origin = _origin_mixed(tmp_path)
+    calls = []
+    _patch_eval(monkeypatch, calls)
+
+    cli.review(str(origin), workdir=str(tmp_path / "wd"), force=True)
+
+    # Only backend files reach the agent; .tsx and frontend/ js dropped.
+    assert calls[0] == ["server.py", "svc.go"]
+
+
+def test_with_frontend_includes_everything(tmp_path, monkeypatch):
+    origin = _origin_mixed(tmp_path)
+    calls = []
+    _patch_eval(monkeypatch, calls)
+
+    cli.review(str(origin), workdir=str(tmp_path / "wd"), force=True,
+               with_frontend=True)
+
+    assert calls[0] == [
+        "frontend/App.tsx", "frontend/index.js", "server.py", "svc.go",
+    ]
+
+
+def test_main_wires_with_frontend_flag(tmp_path, monkeypatch):
+    origin = _origin_mixed(tmp_path)
+    seen = {}
+
+    def fake_review(url, workdir, force, *, max_files=None,
+                    with_frontend=False):
+        seen["with_frontend"] = with_frontend
+        return {}
+
+    monkeypatch.setattr(cli, "review", fake_review)
+    cli.main([str(origin), "--workdir", str(tmp_path / "wd")])
+    assert seen["with_frontend"] is False
+    cli.main([str(origin), "--workdir", str(tmp_path / "wd"),
+              "--with-frontend"])
+    assert seen["with_frontend"] is True

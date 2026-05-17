@@ -66,6 +66,35 @@ CODE_EXT = {".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rs",
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv",
              "dist", "build", ".pytest_cache"}
 
+# Heuristic frontend classification, used to optionally drop UI/web files
+# when the reviewer only cares about the backend. Design bias: never drop
+# a backend file. Inherently-frontend extensions count as frontend
+# anywhere; ambiguous JS/TS only counts as frontend under a frontend-ish
+# directory; backend languages (.py/.go/.rs/...) are never frontend.
+FRONTEND_EXT = {".jsx", ".tsx", ".vue", ".svelte", ".css", ".scss",
+                ".sass", ".less", ".styl", ".html", ".htm"}
+WEB_AMBIG_EXT = {".js", ".ts", ".mjs", ".cjs"}
+FRONTEND_DIRS = {"frontend", "client", "web", "webapp", "ui", "public",
+                 "static", "assets", "www", "styles"}
+
+
+def is_frontend_path(rel_posix: str) -> bool:
+    """True if *rel_posix* looks like a frontend/UI file by the heuristic."""
+    p = Path(rel_posix)
+    ext = p.suffix.lower()
+    if ext in FRONTEND_EXT:
+        return True
+    if ext in WEB_AMBIG_EXT and any(
+        part.lower() in FRONTEND_DIRS for part in p.parts
+    ):
+        return True
+    return False
+
+
+def exclude_frontend(files: list[str]) -> list[str]:
+    """Return *files* with heuristically-frontend paths dropped (order kept)."""
+    return [f for f in files if not is_frontend_path(f)]
+
 
 def inventory_files(repo_path: str) -> list[str]:
     """Return sorted posix-relative paths of all code files under repo_path, skipping vendored/build dirs."""

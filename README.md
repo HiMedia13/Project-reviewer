@@ -52,10 +52,22 @@ Haiku(저비용). 4기준 서브에이전트는 병렬 실행되고, evaluator�
     python main.py https://github.com/owner/repo.git --force        # 캐시 무시, 전체 재평가
     python main.py https://github.com/owner/repo.git --max-files 2   # 평가 파일 수 상한(저비용 검증)
     python main.py https://github.com/owner/repo.git --progress      # 비-TTY에서도 평문 진행 로그
+    python main.py https://github.com/owner/repo.git --with-frontend  # 프론트엔드/UI 파일도 포함
     python main.py --serve                                           # 이력 조회 웹 UI
 
 - `--workdir` 기본값 `.reviewer` (작업·캐시·DB·출력 루트)
 - `--max-files 0` 은 "아무 파일도 평가하지 않음"(드라이런), 음수는 거부
+- **기본은 백엔드 중심**: 프론트엔드/UI 파일(`.tsx/.jsx/.vue/.svelte/.css/...`,
+  `frontend·client·web·ui·static/...` 디렉터리의 js/ts)은 자동 제외된다.
+  전부 평가하려면 `--with-frontend`. 백엔드 언어 파일(`.py/.go/...`)은
+  어떤 디렉터리에 있든 절대 제외되지 않는다.
+
+### 실행 중단 (Ctrl+C)
+
+평가 도중 `Ctrl+C` **한 번** → 우아한 중단: 진행 중인 단계 경계에서 멈추고,
+그때까지 서브에이전트가 제출한 부분 findings·기술스택 평가를 DB에 저장한
+뒤 부분 리포트를 출력한다(추가 LLM 호출 없음 = 추가 비용 없음).
+**한 번 더** `Ctrl+C` → 즉시 강제 종료.
 
 ### 진행상황 표시(TUI)
 

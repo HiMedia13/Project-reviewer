@@ -3,11 +3,15 @@
 Pure synthetic events — no real LLM, no network, no Rich Live loop.
 """
 
+import pytest
+
 from app.agent.progress import (
     PHASES,
     MODEL_PRICES,
     _price_for,
     ReviewProgress,
+    ReviewInterrupted,
+    _InterruptState,
     run_with_progress,
 )
 
@@ -220,6 +224,96 @@ def test_run_with_progress_disabled_no_callbacks():
     assert agent.invoke_count == 1
     assert agent.called_with_config is False
     assert agent.last_kwargs == {}
+
+
+# --- cooperative interrupt -----------------------------------------------
+
+def test_interrupt_state_first_graceful_second_hard():
+    s = _InterruptState()
+    assert s.requested is False
+    assert s.signal() == "graceful"
+    assert s.requested is True
+    assert s.signal() == "hard"           # second press → hard kill
+    assert s.signal() == "hard"           # stays hard
+
+
+def test_review_interrupted_is_keyboardinterrupt():
+    # Subclassing KeyboardInterrupt (BaseException) means the handler's
+    # `except Exception` guards never swallow a requested stop.
+    assert issubclass(ReviewInterrupted, KeyboardInterrupt)
+
+
+def test_progress_check_interrupt_raises_at_boundaries():
+    h = _handler()
+    st = _InterruptState()
+    h._interrupt = st
+    # Not requested → callbacks behave normally, no raise.
+    h.on_tool_start({"name": "read_repo_file"}, inputs={"path": "a.py"})
+    h.on_chain_start({}, {})
+    # Requested → every step boundary raises ReviewInterrupted.
+    st.requested = True
+    with pytest.raises(ReviewInterrupted):
+        h.on_tool_start({"name": "read_repo_file"}, inputs={"path": "b.py"})
+    with pytest.raises(ReviewInterrupted):
+        h.on_chain_start({}, {})
+    with pytest.raises(ReviewInterrupted):
+        h.on_llm_end(object())
+
+
+class _InterruptingAgent:
+    """Fake agent: simulates a graceful Ctrl+C mid-run by tripping the
+    handler's interrupt state, then hitting the next callback boundary."""
+
+    def __init__(self):
+        self.config = None
+
+    def invoke(self, payload, **kwargs):
+        self.config = kwargs.get("config")
+        handler = kwargs["config"]["callbacks"][0]
+        handler._interrupt.requested = True
+        handler.on_tool_start({"name": "read_repo_file"},
+                              inputs={"path": "a.py"})  # raises
+        raise AssertionError("unreachable: callback must have raised")
+
+
+def test_run_with_progress_graceful_interrupt_returns_partial_live():
+    holder = {}
+
+    def factory(renderable, **kwargs):
+        return _FakeLive(renderable, **kwargs)
+
+    out = run_with_progress(_InterruptingAgent(), {"messages": []},
+                            enabled=True, total_files=2,
+                            model="claude-haiku-4-5-20251001",
+                            _live_factory=factory, interrupt_holder=holder)
+    assert out == ""
+    assert holder["interrupted"] is True
+
+
+def test_run_with_progress_graceful_interrupt_returns_partial_plain(capsys):
+    holder = {}
+    out = run_with_progress(_InterruptingAgent(), {"messages": []},
+                            enabled=True, plain=True, total_files=2,
+                            model="claude-haiku-4-5-20251001",
+                            interrupt_holder=holder)
+    assert out == ""
+    assert holder["interrupted"] is True
+    # the final plain status line is still flushed on interrupt
+    assert "phase=" in capsys.readouterr().out
+
+
+def test_run_with_progress_disabled_interrupt_returns_partial():
+    holder = {}
+
+    class _A:
+        def invoke(self, payload, **kw):
+            raise ReviewInterrupted()
+
+    out = run_with_progress(_A(), {"messages": []}, enabled=False,
+                            total_files=1, model="claude-haiku-4-5-20251001",
+                            interrupt_holder=holder)
+    assert out == ""
+    assert holder["interrupted"] is True
 
 
 def test_phases_constant_shape():

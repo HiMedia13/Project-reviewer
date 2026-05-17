@@ -154,6 +154,50 @@ def test_run_agent_uses_holder_findings_when_submitted(monkeypatch):
     assert holder["raw"] == "RESULT"
 
 
+def test_run_agent_interrupted_skips_paid_finalize(monkeypatch):
+    # Graceful Ctrl+C: run_with_progress sets holder["interrupted"] and
+    # returns "". run_agent must persist ONLY what was already submitted
+    # and must NOT call the paid finalize_* fallbacks.
+    def fake_rwp(agent, payload, **kw):
+        kw["interrupt_holder"]["interrupted"] = True
+        return ""
+
+    def boom(*a, **k):
+        raise AssertionError("finalize must not run after interrupt")
+
+    monkeypatch.setattr(orch, "run_with_progress", fake_rwp)
+    monkeypatch.setattr(orch, "finalize_findings", boom)
+    monkeypatch.setattr(orch, "finalize_tech", boom)
+
+    holder = {"findings": [{"file_path": "partial.py"}],
+              "tech_assessment": {"purpose": "p"}}
+    rows, ta, raw = orch.run_agent("AGENT", holder, ["a.py"],
+                                   enabled=True, plain=False)
+
+    assert rows == [{"file_path": "partial.py"}]
+    assert ta == {"purpose": "p"}
+    assert raw == ""
+
+
+def test_run_agent_interrupted_with_no_submissions_returns_empty(monkeypatch):
+    def fake_rwp(agent, payload, **kw):
+        kw["interrupt_holder"]["interrupted"] = True
+        return ""
+
+    monkeypatch.setattr(orch, "run_with_progress", fake_rwp)
+    monkeypatch.setattr(
+        orch, "finalize_findings",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no")))
+    monkeypatch.setattr(
+        orch, "finalize_tech",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no")))
+
+    holder = {}
+    rows, ta, raw = orch.run_agent("AGENT", holder, ["a.py"],
+                                   enabled=False, plain=False)
+    assert rows == [] and ta == {} and raw == ""
+
+
 def test_build_payload_consistent_with_parallel_contract():
     # The user-turn message must not contradict the system prompt's
     # parallel-dispatch contract (the P3/P6 prompt-vs-payload bug class).
