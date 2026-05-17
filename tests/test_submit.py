@@ -10,8 +10,11 @@ import pytest
 
 from app.agent.submit import (
     finalize_findings,
+    finalize_tech,
     make_submit_tool,
+    make_tech_tool,
     normalize_rows,
+    normalize_tech_assessment,
 )
 from app.findings_parser import parse_findings
 
@@ -485,6 +488,430 @@ def test_finalize_does_not_import_langchain_anthropic():
         )
     )
     finalize_findings(
+        holder, "seed", model="m", _model_factory=_factory_for(chat)
+    )
+    assert "langchain_anthropic" not in sys.modules
+
+
+# --------------------------------------------------------------------------
+# P8: project-level submit_tech_assessment tool + finalize-tech guard.
+# Pure: fake model via the ``_model_factory`` seam, never network.
+# --------------------------------------------------------------------------
+
+_TECH_KEYSET = {"purpose", "stack", "stack_verdict", "stack_score"}
+_TECH_ITEM_KEYSET = {
+    "tech",
+    "role",
+    "used_well",
+    "purpose_fit",
+    "rationale",
+    "evidence",
+}
+
+
+def _full_assessment() -> dict:
+    return {
+        "purpose": "A CLI code reviewer",
+        "stack": [
+            {
+                "tech": "LangChain",
+                "role": "agent orchestration",
+                "used_well": "good",
+                "purpose_fit": "fit",
+                "rationale": "tool-calling loop is idiomatic",
+                "evidence": "app/agent/orchestrator.py",
+            },
+            {
+                "tech": "SQLite",
+                "role": "findings persistence",
+                "used_well": "mixed",
+                "purpose_fit": "questionable",
+                "rationale": "no migrations",
+                "evidence": "app/db.py",
+            },
+        ],
+        "stack_verdict": "Mostly appropriate; persistence is weak.",
+        "stack_score": "82",
+    }
+
+
+def test_tech_tool_name_and_invocable():
+    holder: dict = {}
+    tool = make_tech_tool(holder)
+    assert tool.name == "submit_tech_assessment"
+    out = tool.invoke({"assessment": {}})
+    assert isinstance(out, str)
+
+
+def test_tech_tool_exposes_args_schema():
+    holder: dict = {}
+    tool = make_tech_tool(holder)
+    assert "assessment" in tool.args
+    assert tool.args_schema is not None
+
+
+def test_tech_happy_path_full_assessment():
+    holder: dict = {}
+    tool = make_tech_tool(holder)
+    msg = tool.invoke({"assessment": _full_assessment()})
+
+    assert holder["tech_submitted"] is True
+    ta = holder["tech_assessment"]
+    assert set(ta.keys()) == _TECH_KEYSET
+    assert ta["purpose"] == "A CLI code reviewer"
+    assert ta["stack_verdict"] == "Mostly appropriate; persistence is weak."
+    assert ta["stack_score"] == 82  # "82" coerced to int
+    assert isinstance(ta["stack"], list) and len(ta["stack"]) == 2
+    for item in ta["stack"]:
+        assert set(item.keys()) == _TECH_ITEM_KEYSET
+    assert ta["stack"][0]["tech"] == "LangChain"
+    assert ta["stack"][0]["used_well"] == "good"
+    assert ta["stack"][0]["purpose_fit"] == "fit"
+    assert "2" in msg
+
+
+def test_tech_defaults_on_empty_dict():
+    holder: dict = {}
+    tool = make_tech_tool(holder)
+    tool.invoke({"assessment": {}})
+
+    ta = holder["tech_assessment"]
+    assert set(ta.keys()) == _TECH_KEYSET
+    assert ta["purpose"] == ""
+    assert ta["stack"] == []
+    assert ta["stack_verdict"] == ""
+    assert ta["stack_score"] is None
+    assert holder["tech_submitted"] is True
+
+
+def test_tech_stack_not_a_list_becomes_empty():
+    holder: dict = {}
+    tool = make_tech_tool(holder)
+    tool.invoke({"assessment": {"purpose": "p", "stack": "not a list"}})
+    ta = holder["tech_assessment"]
+    assert ta["purpose"] == "p"
+    assert ta["stack"] == []
+
+
+def test_tech_stack_item_without_tech_is_dropped():
+    holder: dict = {}
+    tool = make_tech_tool(holder)
+    tool.invoke(
+        {
+            "assessment": {
+                "stack": [
+                    {"role": "x"},  # no tech -> dropped
+                    {"tech": "", "role": "y"},  # empty tech -> dropped
+                    {"tech": "Redis", "role": "cache"},  # kept
+                    "garbage string",  # not dict-coercible -> dropped
+                    123,  # not dict-coercible -> dropped
+                ]
+            }
+        }
+    )
+    ta = holder["tech_assessment"]
+    assert len(ta["stack"]) == 1
+    assert ta["stack"][0]["tech"] == "Redis"
+    assert set(ta["stack"][0].keys()) == _TECH_ITEM_KEYSET
+
+
+def test_tech_extra_unknown_keys_ignored():
+    holder: dict = {}
+    tool = make_tech_tool(holder)
+    tool.invoke(
+        {
+            "assessment": {
+                "purpose": "p",
+                "totally_unknown": "drop me",
+                "stack": [
+                    {"tech": "Go", "weird_key": "drop", "role": "svc"}
+                ],
+            }
+        }
+    )
+    ta = holder["tech_assessment"]
+    assert "totally_unknown" not in ta
+    assert set(ta.keys()) == _TECH_KEYSET
+    assert "weird_key" not in ta["stack"][0]
+
+
+def test_tech_non_dict_assessment_no_raise():
+    holder: dict = {}
+    tool = make_tech_tool(holder)
+    for bad in ("a string", 123, [1, 2, 3], None):
+        msg = tool.invoke({"assessment": bad})
+        assert isinstance(msg, str)
+        ta = holder["tech_assessment"]
+        assert set(ta.keys()) == _TECH_KEYSET
+        assert ta["stack"] == []
+        assert holder["tech_submitted"] is True
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("82", 82),
+        (82.0, 82),
+        (82, 82),
+        ("n/a", None),
+        ("3.5", None),
+        (3.5, None),
+        (True, None),
+        (False, None),
+        (None, None),
+        ("", None),
+    ],
+)
+def test_tech_stack_score_coercion(raw, expected):
+    out = normalize_tech_assessment({"stack_score": raw})
+    assert out["stack_score"] == expected
+    assert out["stack_score"] is expected or isinstance(
+        out["stack_score"], int
+    )
+
+
+def test_tech_tool_no_raise_on_realistic_malformed():
+    holder: dict = {}
+    tool = make_tech_tool(holder)
+    # assessment a string / int / list, stack item with int tech,
+    # stack_score "high" -- all must degrade, never raise.
+    for bad in ("free text", 7, ["a", "b"]):
+        assert isinstance(tool.invoke({"assessment": bad}), str)
+    msg = tool.invoke(
+        {
+            "assessment": {
+                "purpose": 999,  # non-str scalar coerced
+                "stack": [
+                    {"tech": 123, "role": 456},  # int tech -> "123"
+                ],
+                "stack_verdict": ["a", "b"],  # non-str -> str(...)
+                "stack_score": "high",  # -> None
+            }
+        }
+    )
+    assert isinstance(msg, str)
+    ta = holder["tech_assessment"]
+    assert ta["purpose"] == "999"
+    assert ta["stack"][0]["tech"] == "123"
+    assert ta["stack"][0]["role"] == "456"
+    assert isinstance(ta["stack_verdict"], str)
+    assert ta["stack_score"] is None
+
+
+def test_normalize_tech_assessment_direct_garbage_no_raise():
+    assert normalize_tech_assessment(None)["stack"] == []
+    assert normalize_tech_assessment("garbage")["stack"] == []
+    assert normalize_tech_assessment(123)["stack"] == []
+    assert normalize_tech_assessment([1, 2, 3])["stack"] == []
+    mixed = normalize_tech_assessment(
+        {
+            "purpose": None,
+            "stack": [
+                None,
+                {"tech": "OK"},
+                "str",
+                {"no_tech": 1},
+                {"tech": "  ", "role": "blank tech dropped"},
+            ],
+            "stack_score": 91,
+        }
+    )
+    assert mixed["purpose"] == ""
+    assert len(mixed["stack"]) == 1
+    assert mixed["stack"][0]["tech"] == "OK"
+    assert mixed["stack_score"] == 91
+    assert set(mixed.keys()) == _TECH_KEYSET
+
+
+def test_normalize_tech_assessment_shape_constants():
+    from app.agent.submit import _TECH_ITEM_KEYS, _TECH_KEYS
+
+    assert set(_TECH_KEYS) == _TECH_KEYSET
+    assert set(_TECH_ITEM_KEYS) == _TECH_ITEM_KEYSET
+    out = normalize_tech_assessment({})
+    assert set(out.keys()) == set(_TECH_KEYS)
+    out2 = normalize_tech_assessment({"stack": [{"tech": "x"}]})
+    assert set(out2["stack"][0].keys()) == set(_TECH_ITEM_KEYS)
+
+
+def test_finalize_tech_happy_path_captures_via_normalizer():
+    holder: dict = {}
+    chat = _FakeChat(
+        resp=_FakeResp(
+            [
+                {
+                    "name": "submit_tech_assessment",
+                    "args": {"assessment": _full_assessment()},
+                    "id": "tc_1",
+                }
+            ]
+        )
+    )
+    factory = _factory_for(chat)
+
+    ta = finalize_tech(
+        holder, "raw eval text", model="m", _model_factory=factory
+    )
+
+    assert ta is holder["tech_assessment"]
+    assert holder["tech_submitted"] is True
+    assert set(ta.keys()) == _TECH_KEYSET
+    assert ta["purpose"] == "A CLI code reviewer"
+    assert ta["stack_score"] == 82
+    assert len(ta["stack"]) == 2
+    assert chat.bound_tool_choice == "submit_tech_assessment"
+    assert chat.bound_tools is not None and len(chat.bound_tools) == 1
+    assert factory.captured["model"] == "m"
+
+
+def test_finalize_tech_noop_when_already_submitted_with_stack():
+    existing = normalize_tech_assessment(_full_assessment())
+    holder = {"tech_submitted": True, "tech_assessment": existing}
+
+    def _exploding_factory(model_name):
+        raise AssertionError("model factory must NOT be called on no-op")
+
+    ta = finalize_tech(
+        holder, "seed", model="m", _model_factory=_exploding_factory
+    )
+    assert ta is existing
+    assert holder["tech_assessment"] is existing
+    assert holder["tech_submitted"] is True
+
+
+def test_finalize_tech_noop_when_submitted_with_purpose_only():
+    existing = normalize_tech_assessment({"purpose": "only purpose"})
+    holder = {"tech_submitted": True, "tech_assessment": existing}
+
+    def _exploding_factory(model_name):
+        raise AssertionError("model factory must NOT be called on no-op")
+
+    ta = finalize_tech(
+        holder, "seed", model="m", _model_factory=_exploding_factory
+    )
+    assert ta is existing
+
+
+def test_finalize_tech_attempts_guard_when_submitted_but_empty():
+    holder = {
+        "tech_submitted": True,
+        "tech_assessment": normalize_tech_assessment(None),
+    }
+    chat = _FakeChat(
+        resp=_FakeResp(
+            [
+                {
+                    "name": "submit_tech_assessment",
+                    "args": {"assessment": {"stack": [{"tech": "Z"}]}},
+                    "id": "c",
+                }
+            ]
+        )
+    )
+    ta = finalize_tech(
+        holder, "seed", model="m", _model_factory=_factory_for(chat)
+    )
+    assert len(ta["stack"]) == 1
+    assert ta["stack"][0]["tech"] == "Z"
+    assert holder["tech_submitted"] is True
+
+
+@pytest.mark.parametrize(
+    "tool_calls",
+    [
+        [],
+        _NO_ATTR,
+        [{"name": "submit_tech_assessment", "args": {}}],
+        [{"name": "submit_tech_assessment",
+          "args": {"assessment": "garbage"}}],
+        [{"name": "submit_tech_assessment", "args": {"assessment": 123}}],
+        [{"name": "submit_tech_assessment", "args": {"assessment": None}}],
+        [{"name": "submit_tech_assessment"}],
+        [{"name": "other_tool",
+          "args": {"assessment": {"stack": [{"tech": "a"}]}}}],
+        [{"name": "submit_tech_assessment", "args": None}],
+    ],
+)
+def test_finalize_tech_malformed_response_no_raise(tool_calls):
+    holder: dict = {}
+    chat = _FakeChat(resp=_FakeResp(tool_calls))
+    ta = finalize_tech(
+        holder, "seed", model="m", _model_factory=_factory_for(chat)
+    )
+    assert set(ta.keys()) == _TECH_KEYSET
+    assert ta["stack"] == []
+    assert ta["purpose"] == ""
+    assert holder["tech_submitted"] is True
+
+
+def test_finalize_tech_other_tool_name_first_then_submit():
+    holder: dict = {}
+    chat = _FakeChat(
+        resp=_FakeResp(
+            [
+                {"name": "noise", "args": {"x": 1}},
+                {
+                    "name": "submit_tech_assessment",
+                    "args": {"assessment": {"stack": [{"tech": "good"}]}},
+                },
+            ]
+        )
+    )
+    ta = finalize_tech(
+        holder, "seed", model="m", _model_factory=_factory_for(chat)
+    )
+    assert len(ta["stack"]) == 1
+    assert ta["stack"][0]["tech"] == "good"
+
+
+def test_finalize_tech_exception_path_no_propagate():
+    holder: dict = {}
+    chat = _FakeChat(raise_exc=RuntimeError("boom"))
+    ta = finalize_tech(
+        holder, "seed", model="m", _model_factory=_factory_for(chat)
+    )
+    assert set(ta.keys()) == _TECH_KEYSET
+    assert ta["stack"] == []
+    assert holder["tech_submitted"] is True
+
+
+def test_finalize_tech_exception_preserves_preexisting_assessment():
+    existing = normalize_tech_assessment(_full_assessment())
+    holder = {"tech_submitted": False, "tech_assessment": existing}
+    chat = _FakeChat(raise_exc=RuntimeError("boom"))
+    ta = finalize_tech(
+        holder, "seed", model="m", _model_factory=_factory_for(chat)
+    )
+    assert ta is existing
+    assert holder["tech_submitted"] is True
+
+
+@pytest.mark.parametrize("seed", ["", "x" * 200000], ids=["empty", "large"])
+def test_finalize_tech_seed_text_variations(seed):
+    holder: dict = {}
+    chat = _FakeChat(
+        resp=_FakeResp(
+            [{"name": "submit_tech_assessment",
+              "args": {"assessment": {"stack": [{"tech": "s"}]}}}]
+        )
+    )
+    ta = finalize_tech(
+        holder, seed, model="m", _model_factory=_factory_for(chat)
+    )
+    assert len(ta["stack"]) == 1
+    assert ta["stack"][0]["tech"] == "s"
+
+
+def test_finalize_tech_does_not_import_langchain_anthropic():
+    sys.modules.pop("langchain_anthropic", None)
+    holder: dict = {}
+    chat = _FakeChat(
+        resp=_FakeResp(
+            [{"name": "submit_tech_assessment",
+              "args": {"assessment": {"stack": [{"tech": "n"}]}}}]
+        )
+    )
+    finalize_tech(
         holder, "seed", model="m", _model_factory=_factory_for(chat)
     )
     assert "langchain_anthropic" not in sys.modules

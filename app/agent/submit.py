@@ -339,3 +339,299 @@ def finalize_findings(
         holder["findings"] = fallback
         holder["submitted"] = True
         return fallback
+
+
+# ==========================================================================
+# P8: project-level tech-stack-fit assessment. The product's PRIMARY desired
+# output. Mirrors EXACTLY the validated submit_findings / finalize_findings
+# patterns: a permissive args schema, ``normalize_tech_assessment`` as the
+# SOLE never-raising coercion authority, and a deterministic tool_choice-
+# forced finalize fallback. ISOLATED — not wired into the orchestrator (P9).
+# ==========================================================================
+
+# Exactly the keys every normalized tech assessment must carry.
+_TECH_KEYS = ("purpose", "stack", "stack_verdict", "stack_score")
+# Exactly the keys every normalized stack item must carry.
+_TECH_ITEM_KEYS = (
+    "tech",
+    "role",
+    "used_well",
+    "purpose_fit",
+    "rationale",
+    "evidence",
+)
+
+# Human/model-readable description of the intended assessment schema. As with
+# _ROW_SHAPE_DOC this is the ONLY place the strict shape is asserted toward
+# the model — strict typing is deliberately NOT used on the args schema.
+_TECH_SHAPE_DOC = (
+    "The assessment is an object with: "
+    "purpose (string — the inferred overall purpose of the project); "
+    "stack (array of objects, each "
+    "{tech, role, used_well, purpose_fit, rationale, evidence} where "
+    "used_well is one of 'good'/'mixed'/'poor', purpose_fit is one of "
+    "'fit'/'questionable'/'misfit'); "
+    "stack_verdict (string — short overall narrative); "
+    "stack_score (integer 0-100 or null — overall tech-stack-fit score)."
+)
+
+
+class TechStackItem(BaseModel):
+    """Documentation-only model of one stack item.
+
+    NOT used in the args_schema validation path (strict typing there
+    would raise on improvised model output). Kept purely as a structured
+    description of the intended shape for callers/readers.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    tech: str = ""
+    role: str = ""
+    used_well: str = ""
+    purpose_fit: str = ""
+    rationale: str = ""
+    evidence: str = ""
+
+
+class TechAssessment(BaseModel):
+    """Documentation-only model of the project tech assessment.
+
+    NOT used in the args_schema validation path; see ``TechStackItem``.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    purpose: str = ""
+    stack: list[TechStackItem] = Field(default_factory=list)
+    stack_verdict: str = ""
+    stack_score: int | None = None
+
+
+class SubmitTechArgs(BaseModel):
+    """Permissive args schema for the submit_tech_assessment tool.
+
+    ``assessment`` is typed as ``Any`` (NOT ``TechAssessment`` or even
+    ``dict``) so that any JSON the model emits — a bare string, an int, a
+    list, a partially-typed object — passes pydantic validation and
+    reaches the callback, where ``normalize_tech_assessment`` is the sole
+    coercion authority. ``extra="ignore"`` is pinned explicitly so
+    improvised top-level keys are dropped deterministically.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    assessment: Any = Field(
+        default=None,
+        description=(
+            "The full project tech-stack-fit assessment to record. "
+            + _TECH_SHAPE_DOC
+        ),
+    )
+
+
+def _str_or_empty(value: Any) -> str:
+    """Coerce any scalar to a string; None / falsy-None -> ""."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _normalize_stack_item(raw: Any) -> dict | None:
+    """Normalize one stack item to ``_TECH_ITEM_KEYS``.
+
+    Returns None when *raw* is not dict-coercible or has an empty
+    ``tech`` (such items are dropped by the caller). Never raises.
+    """
+    d = _as_dict(raw)
+    if d is None:
+        return None
+    tech = _str_or_empty(d.get("tech", ""))
+    if not tech.strip():
+        return None
+    return {
+        "tech": tech,
+        "role": _str_or_empty(d.get("role", "")),
+        "used_well": _str_or_empty(d.get("used_well", "")),
+        "purpose_fit": _str_or_empty(d.get("purpose_fit", "")),
+        "rationale": _str_or_empty(d.get("rationale", "")),
+        "evidence": _str_or_empty(d.get("evidence", "")),
+    }
+
+
+def normalize_tech_assessment(raw: Any) -> dict:
+    """Pure, never-raising normalizer: the SOLE coercion authority.
+
+    Accepts anything (dict, pydantic model, str, None, list, garbage)
+    and returns a plain dict with exactly ``_TECH_KEYS``. ``stack`` is a
+    list of dicts each with exactly ``_TECH_ITEM_KEYS``; stack items that
+    are not dict-coercible or have an empty ``tech`` are dropped. A
+    non-list ``stack`` (or a non-dict assessment) yields ``stack == []``.
+    ``stack_score`` is coerced via the shared ``_coerce_int_or_none``
+    (so "82" -> 82, 82.0 -> 82, "n/a"/3.5/bools -> None). Never raises.
+    """
+    d = _as_dict(raw) or {}
+
+    raw_stack = d.get("stack")
+    stack: list[dict] = []
+    if isinstance(raw_stack, list):
+        for entry in raw_stack:
+            item = _normalize_stack_item(entry)
+            if item is not None:
+                stack.append(item)
+
+    return {
+        "purpose": _str_or_empty(d.get("purpose", "")),
+        "stack": stack,
+        "stack_verdict": _str_or_empty(d.get("stack_verdict", "")),
+        "stack_score": _coerce_int_or_none(d.get("stack_score")),
+    }
+
+
+def make_tech_tool(holder: dict) -> StructuredTool:
+    """Return the ``submit_tech_assessment`` tool, capturing into *holder*.
+
+    The tool argument is validated only against the permissive
+    ``SubmitTechArgs`` (``assessment: Any``), so any JSON the model emits
+    reaches the callback. The callback runs ``normalize_tech_assessment``
+    (the sole coercion authority), OVERWRITES
+    ``holder["tech_assessment"]`` and sets
+    ``holder["tech_submitted"] = True``. It never raises on malformed
+    input: an unusable payload records a sane empty assessment.
+    """
+
+    def _submit(assessment: Any = None) -> str:
+        try:
+            ta = normalize_tech_assessment(assessment)
+        except Exception:
+            ta = normalize_tech_assessment(None)
+        # Overwrite (not append): the holder reflects only the latest call.
+        holder["tech_assessment"] = ta
+        holder["tech_submitted"] = True
+        return (
+            f"OK: tech assessment recorded "
+            f"({len(ta['stack'])} stack items)."
+        )
+
+    return StructuredTool.from_function(
+        func=_submit,
+        name="submit_tech_assessment",
+        description=(
+            "Submit the final project-level tech-stack-fit assessment: "
+            "what tech is used, whether each is used per its intended "
+            "design, and whether it is appropriate for the project's "
+            "purpose. Call this exactly once with the complete "
+            "assessment. " + _TECH_SHAPE_DOC
+        ),
+        args_schema=SubmitTechArgs,
+    )
+
+
+# Korean instruction prefixed to the seed text for the finalize-tech guard.
+# The model is forced (tool_choice) to emit a submit_tech_assessment call,
+# so this only needs to point it at the schema and forbid prose.
+_TECH_FINALIZE_INSTRUCTION = (
+    "아래는 프로젝트 기술 스택 적합성 평가 결과 원문이다. 이를 "
+    "submit_tech_assessment 스키마(purpose/stack[tech,role,used_well,"
+    "purpose_fit,rationale,evidence]/stack_verdict/stack_score)에 맞는 "
+    "JSON으로 변환해 submit_tech_assessment 도구를 호출하라. 설명 금지."
+)
+
+
+def _extract_tech_arg(resp: Any) -> Any:
+    """Pull the raw ``assessment`` arg out of an AIMessage-like response.
+
+    Defensive against: missing ``.tool_calls``, empty/non-list
+    tool_calls, entries that are not dicts, missing/non-dict ``args``.
+    Only a tool call actually named ``submit_tech_assessment`` is honored.
+    Never raises; returns whatever it finds (passed to
+    ``normalize_tech_assessment``, which itself never raises).
+    """
+    tool_calls = getattr(resp, "tool_calls", None)
+    if not isinstance(tool_calls, list) or not tool_calls:
+        return None
+
+    chosen = None
+    for tc in tool_calls:
+        if (
+            isinstance(tc, dict)
+            and tc.get("name") == "submit_tech_assessment"
+        ):
+            chosen = tc
+            break
+    if not isinstance(chosen, dict):
+        return None
+
+    args = chosen.get("args")
+    if not isinstance(args, dict):
+        return None
+    return args.get("assessment")
+
+
+def finalize_tech(
+    holder: dict,
+    seed_text: str,
+    *,
+    model: str,
+    _model_factory=None,
+) -> dict:
+    """Deterministic finalize-tech guard: force a structured capture.
+
+    ISOLATED helper (P8): NOT wired into the orchestrator yet. Mirrors
+    ``finalize_findings``. When the agentic loop finishes without a proper
+    ``submit_tech_assessment`` call the *holder* is empty / stub. This
+    makes ONE constrained model call forced (via ``tool_choice``) to emit
+    a ``submit_tech_assessment`` tool call, then reads the structured
+    arguments DIRECTLY off the response — it does NOT rely on the agent
+    loop or on tool-execution side effects.
+
+    No-op condition (documented choice): skip the model call ONLY when
+    ``tech_submitted`` is True AND ``tech_assessment`` is a dict that
+    carries real content — a non-empty ``stack`` OR a non-empty
+    ``purpose``. A truthy ``tech_submitted`` whose assessment is empty
+    (no stack and no purpose) STILL attempts the guard: that early/empty
+    submission is exactly the failure mode this guards.
+
+    NEVER raises: any failure (network, bad response shape, attribute
+    errors) degrades to the pre-existing assessment (or a freshly
+    normalized empty one) and marks ``tech_submitted``, so a finalize
+    failure cannot abort the pipeline.
+    """
+    if holder.get("tech_submitted") is True:
+        existing = holder.get("tech_assessment")
+        if isinstance(existing, dict) and (
+            existing.get("stack") or existing.get("purpose")
+        ):
+            return existing
+
+    try:
+        llm = (_model_factory or _default_chat)(model)
+        tool = make_tech_tool(holder)
+        bound = llm.bind_tools(
+            [tool], tool_choice="submit_tech_assessment"
+        )
+        messages = [
+            (
+                "human",
+                _TECH_FINALIZE_INSTRUCTION
+                + "\n\n---\n"
+                + (seed_text or ""),
+            )
+        ]
+        resp = bound.invoke(messages)
+        raw = _extract_tech_arg(resp)
+        ta = normalize_tech_assessment(raw)
+        holder["tech_assessment"] = ta
+        holder["tech_submitted"] = True
+        return ta
+    except Exception:
+        # Degrade gracefully: never propagate. Preserve any pre-existing
+        # assessment dict; otherwise record a sane empty assessment.
+        fallback = holder.get("tech_assessment")
+        if not isinstance(fallback, dict):
+            fallback = normalize_tech_assessment(None)
+        holder["tech_assessment"] = fallback
+        holder["tech_submitted"] = True
+        return fallback
