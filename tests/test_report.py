@@ -37,3 +37,18 @@ def test_terminal_summary_returns_text():
     s = terminal_summary(_ctx())
     assert "77" in s
     assert "deadcode" in s
+
+
+def test_render_html_escapes_untrusted_findings(tmp_path):
+    # findings come from the LLM agent (untrusted) — must be HTML-escaped.
+    ctx = _ctx()
+    ctx["findings"][0]["file_path"] = "<script>alert(1)</script>"
+    ctx["findings"][0]["findings"][0]["msg"] = '"><img src=x onerror=alert(2)>'
+    out = tmp_path / "r.html"
+    render_html(ctx, str(out))
+    html = out.read_text(encoding="utf-8")
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;" in html
+    # the <img> payload must be inert escaped text, not a live tag
+    assert "<img src=x onerror=alert(2)>" not in html
+    assert "&lt;img src=x onerror=alert(2)&gt;" in html

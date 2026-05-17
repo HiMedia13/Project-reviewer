@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jinja2 import Environment, FileSystemLoader
 from rich.console import Console
 from rich.table import Table
 
@@ -10,7 +10,10 @@ _TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
 def render_html(ctx: dict, out_path: str) -> None:
     env = Environment(
         loader=FileSystemLoader(str(_TEMPLATES)),
-        autoescape=select_autoescape(["html"]),
+        # Template is always HTML; force autoescape. select_autoescape keys
+        # off the final suffix (.j2), which would silently disable escaping
+        # and let untrusted LLM-produced findings inject raw HTML/JS.
+        autoescape=True,
     )
     html = env.get_template("report.html.j2").render(**ctx)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
