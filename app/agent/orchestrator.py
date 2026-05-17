@@ -53,8 +53,9 @@ def build_agent(repo_path: str, in_scope: list[str]):
 def build_payload(in_scope: list[str]) -> dict:
     msg = (
         "다음 in-scope 파일들을 평가하라. 워크플로우대로 scanner → 4기준 → "
-        "evaluator 순으로 진행하고, 최종적으로 evaluator가 검증한 결과를 "
-        "JSON 배열로만 반환하라.\n파일:\n" + "\n".join(in_scope)
+        "evaluator 순으로 진행하고, evaluator가 검증한 최종 결과를 "
+        "submit_findings 도구를 호출해 제출하라(종료의 유일한 방법). "
+        "JSON을 메시지 본문으로 출력하지 말 것.\n파일:\n" + "\n".join(in_scope)
     )
     return {"messages": [{"role": "user", "content": msg}]}
 
