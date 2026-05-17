@@ -20,11 +20,43 @@ def render_html(ctx: dict, out_path: str) -> None:
     Path(out_path).write_text(html, encoding="utf-8")
 
 
+def _truncate(text: str, limit: int = 50) -> str:
+    text = str(text or "")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 def terminal_summary(ctx: dict) -> str:
     console = Console(record=True, width=90)
     o = ctx["overall"]
     console.print(f"[bold]{ctx['repo_url']}[/bold] @ {ctx['commit_sha'][:10]} "
                   f"({ctx['mode']})")
+
+    # LEAD: project-level tech-stack-fit assessment.
+    ta = ctx.get("tech_assessment") or {}
+    purpose = ta.get("purpose") or ""
+    stack = ta.get("stack") or []
+    if purpose or stack:
+        if purpose:
+            console.print(f"[bold]프로젝트 목적:[/bold] {purpose}")
+        if stack:
+            st = Table("기술", "의도대로", "목적적합", "근거")
+            for s in stack:
+                st.add_row(
+                    _truncate(s.get("tech"), 24),
+                    _truncate(s.get("used_well"), 14),
+                    _truncate(s.get("purpose_fit"), 14),
+                    _truncate(s.get("rationale"), 40),
+                )
+            console.print(st)
+        score = ta.get("stack_score")
+        console.print(
+            f"[bold cyan]기술 스택: {ta.get('stack_verdict') or 'N/A'} "
+            f"(score: {score if score is not None else 'N/A'})[/]"
+        )
+    else:
+        console.print("기술 스택 평가 없음")
+
+    # SECONDARY: per-file 4-criteria summary.
     console.print(f"[bold cyan]Overall: "
                   f"{o['score'] if o['score'] is not None else 'N/A'}[/]")
     t = Table("criterion", "score")

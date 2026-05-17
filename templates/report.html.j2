@@ -3,28 +3,68 @@
 <style>
 body{font-family:system-ui,sans-serif;margin:2rem;background:#0f1115;color:#e6e6e6}
 .card{background:#1a1d24;border-radius:12px;padding:1rem 1.5rem;margin:1rem 0}
+.lead{border:1px solid #3a4150}
 .score{font-size:2.5rem;font-weight:700}
 .gauge{display:inline-block;margin-right:1.5rem}
 .badge{padding:.15rem .5rem;border-radius:6px;background:#2a2f3a;font-size:.8rem}
 .high{color:#ff6b6b}.medium{color:#ffd166}.low{color:#8bd450}
-table{border-collapse:collapse;width:100%}td,th{padding:.4rem;border-bottom:1px solid #2a2f3a;text-align:left}
+.ok{color:#8bd450}.no{color:#ff6b6b}
+.muted{color:#8a909c}
+table{border-collapse:collapse;width:100%}td,th{padding:.4rem;border-bottom:1px solid #2a2f3a;text-align:left;vertical-align:top}
+details{margin:1rem 0}summary{cursor:pointer;font-size:1.1rem;font-weight:600;padding:.5rem 0}
+h2.section{margin-bottom:.25rem}
 </style></head><body>
 <h1>Project-Reviewer</h1>
 <div class="card">
   <div>{{ repo_url }} @ <code>{{ commit_sha[:10] }}</code>
        <span class="badge">{{ mode }}</span></div>
-  <div class="score">{{ overall.score if overall.score is not none else "N/A" }}</div>
-  {% for c,v in overall.criteria.items() %}
-    <span class="gauge">{{ c }}: <b>{{ v if v is not none else "—" }}</b></span>
-  {% endfor %}
   <p>tokens in/out: {{ cost.input_tokens }}/{{ cost.output_tokens }} ·
      ${{ "%.4f"|format(cost.cost_usd) }} · {{ "%.1f"|format(duration_sec) }}s
      {% if cost.run_url %}· <a href="{{ cost.run_url }}">LangSmith</a>{% endif %}</p>
 </div>
+
+{% if tech_assessment and (tech_assessment.stack or tech_assessment.purpose) %}
+<div class="card lead">
+  <h2 class="section">기술 스택 적합성</h2>
+  {% if tech_assessment.purpose %}
+  <p><b>프로젝트 목적:</b> {{ tech_assessment.purpose }}</p>
+  {% endif %}
+  <div class="score">{{ tech_assessment.stack_score if tech_assessment.stack_score is not none else "N/A" }}</div>
+  {% if tech_assessment.stack_verdict %}
+  <p><b>{{ tech_assessment.stack_verdict }}</b></p>
+  {% endif %}
+  {% if tech_assessment.stack %}
+  <table>
+    <tr><th>기술</th><th>역할</th><th>의도대로 사용</th><th>목적 적합</th><th>근거</th></tr>
+    {% for s in tech_assessment.stack %}
+    <tr>
+      <td><b>{{ s.tech }}</b></td>
+      <td>{{ s.role }}</td>
+      <td>{{ s.used_well }}</td>
+      <td>{{ s.purpose_fit }}</td>
+      <td>{{ s.rationale }}{% if s.evidence %}<br><span class="muted">{{ s.evidence }}</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+{% else %}
+<div class="card"><p class="muted">기술 스택 평가 없음</p></div>
+{% endif %}
+
 {% if mode == "incremental" %}
 <div class="card"><h2>변경 하이라이트</h2>
 <p>이번에 평가된 파일: {{ changed_files|join(", ") }}</p></div>
 {% endif %}
+
+<details>
+<summary>파일별 상세 findings (보조)</summary>
+<div class="card">
+  <div class="score">{{ overall.score if overall.score is not none else "N/A" }}</div>
+  {% for c,v in overall.criteria.items() %}
+    <span class="gauge">{{ c }}: <b>{{ v if v is not none else "—" }}</b></span>
+  {% endfor %}
+</div>
 {% for f in findings %}
 <div class="card">
   <h3>{{ f.file_path }} — {{ f.criterion }}
@@ -37,4 +77,5 @@ table{border-collapse:collapse;width:100%}td,th{padding:.4rem;border-bottom:1px 
   {% endfor %}</table>
 </div>
 {% endfor %}
+</details>
 </body></html>
