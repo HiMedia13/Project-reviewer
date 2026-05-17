@@ -1,0 +1,40 @@
+<!doctype html><html><head><meta charset="utf-8">
+<title>Project-Reviewer — {{ repo_url }}</title>
+<style>
+body{font-family:system-ui,sans-serif;margin:2rem;background:#0f1115;color:#e6e6e6}
+.card{background:#1a1d24;border-radius:12px;padding:1rem 1.5rem;margin:1rem 0}
+.score{font-size:2.5rem;font-weight:700}
+.gauge{display:inline-block;margin-right:1.5rem}
+.badge{padding:.15rem .5rem;border-radius:6px;background:#2a2f3a;font-size:.8rem}
+.high{color:#ff6b6b}.medium{color:#ffd166}.low{color:#8bd450}
+table{border-collapse:collapse;width:100%}td,th{padding:.4rem;border-bottom:1px solid #2a2f3a;text-align:left}
+</style></head><body>
+<h1>Project-Reviewer</h1>
+<div class="card">
+  <div>{{ repo_url }} @ <code>{{ commit_sha[:10] }}</code>
+       <span class="badge">{{ mode }}</span></div>
+  <div class="score">{{ overall.score if overall.score is not none else "N/A" }}</div>
+  {% for c,v in overall.criteria.items() %}
+    <span class="gauge">{{ c }}: <b>{{ v if v is not none else "—" }}</b></span>
+  {% endfor %}
+  <p>tokens in/out: {{ cost.input_tokens }}/{{ cost.output_tokens }} ·
+     ${{ "%.4f"|format(cost.cost_usd) }} · {{ "%.1f"|format(duration_sec) }}s
+     {% if cost.run_url %}· <a href="{{ cost.run_url }}">LangSmith</a>{% endif %}</p>
+</div>
+{% if mode == "incremental" %}
+<div class="card"><h2>변경 하이라이트</h2>
+<p>이번에 평가된 파일: {{ changed_files|join(", ") }}</p></div>
+{% endif %}
+{% for f in findings %}
+<div class="card">
+  <h3>{{ f.file_path }} — {{ f.criterion }}
+    {% if f.verified %}✅{% else %}⚠️{% endif %}</h3>
+  <p><i>{{ f.verify_note }}</i></p>
+  <table><tr><th>severity</th><th>location</th><th>msg</th><th>evidence</th></tr>
+  {% for x in f.findings %}
+    <tr><td class="{{ x.severity }}">{{ x.severity }}</td>
+        <td>{{ x.location }}</td><td>{{ x.msg }}</td><td>{{ x.evidence }}</td></tr>
+  {% endfor %}</table>
+</div>
+{% endfor %}
+</body></html>
