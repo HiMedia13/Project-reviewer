@@ -15,6 +15,12 @@ from app.findings_parser import parse_findings
 from app.langsmith_cost import aggregate_cost
 from app.report import render_html, terminal_summary
 
+from dotenv import load_dotenv
+
+# Load .env before any module reads env vars (orchestrator reads
+# REVIEWER_MODEL at import time; ChatAnthropic reads ANTHROPIC_API_KEY).
+load_dotenv()
+
 
 def run_evaluation(repo_path: str, in_scope: list[str]) -> str:
     from app.agent.orchestrator import build_agent, run_agent

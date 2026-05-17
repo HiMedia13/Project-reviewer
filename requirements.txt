@@ -2,7 +2,8 @@ deepagents
 langchain
 langchain-anthropic
 langsmith
-tavily-python
+langchain-tavily
+python-dotenv
 GitPython
 rich
 jinja2
