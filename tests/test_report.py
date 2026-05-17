@@ -98,9 +98,33 @@ def test_render_html_escapes_untrusted_tech_assessment(tmp_path):
     render_html(ctx, str(out))
     html = out.read_text(encoding="utf-8")
     assert "<script>alert(1)</script>" not in html
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "<img src=x onerror=alert(3)>" not in html
-    assert "&lt;img src=x onerror=alert(3)&gt;" in html
+    # Pin the escaped content to the HEADLINE region specifically, so a
+    # regression moving tech_assessment into <details> (re-opening a
+    # headline XSS gap) is caught.
+    headline = html.split("<details>")[0]
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in headline
+    assert "&lt;img src=x onerror=alert(3)&gt;" in headline
+
+
+def test_render_html_and_terminal_handle_stack_edge_cases(tmp_path):
+    # stack item missing keys, None stack_score, multiple rows: must not
+    # KeyError and must render "N/A" for the absent score.
+    ctx = _ctx()
+    ctx["tech_assessment"]["stack"] = [
+        {},
+        {"tech": "Click", "role": "CLI", "used_well": "yes",
+         "purpose_fit": "good", "rationale": "fits", "evidence": "cli.py"},
+    ]
+    ctx["tech_assessment"]["stack_score"] = None
+    out = tmp_path / "r.html"
+    render_html(ctx, str(out))                    # must not raise
+    html = out.read_text(encoding="utf-8")
+    assert "Click" in html
+    assert "N/A" in html.split("<details>")[0]    # None score -> N/A headline
+    s = terminal_summary(ctx)                     # must not KeyError
+    assert "Click" in s
+    assert "N/A" in s
 
 
 def test_render_html_no_tech_assessment_graceful(tmp_path):
