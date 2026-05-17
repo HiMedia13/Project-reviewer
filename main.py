@@ -21,7 +21,6 @@ from app.repo_manager import (
 )
 from app.scope import plan_scope
 from app.synthesizer import synthesize
-from app.findings_parser import parse_findings
 from app.langsmith_cost import aggregate_cost
 from app.report import render_html, terminal_summary
 
@@ -32,7 +31,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def run_evaluation(repo_path: str, in_scope: list[str]) -> str:
+def run_evaluation(
+    repo_path: str, in_scope: list[str]
+) -> tuple[list[dict], str]:
     from app.agent.orchestrator import build_agent, run_agent
     # TTY -> Rich Live TUI; non-TTY stays suppressed unless --progress
     # (REVIEWER_PROGRESS) forces plain one-line status into the log.
@@ -40,11 +41,14 @@ def run_evaluation(repo_path: str, in_scope: list[str]) -> str:
     is_tty = sys.stdout.isatty()
     enabled = is_tty or forced
     plain = enabled and not is_tty
-    agent = build_agent(repo_path, in_scope)
-    return run_agent(agent, in_scope, enabled=enabled, plain=plain)
+    agent, holder = build_agent(repo_path, in_scope)
+    rows = run_agent(agent, holder, in_scope, enabled=enabled, plain=plain)
+    raw = holder.get("raw", "")
+    return rows, raw
 
 
-def review(remote_url: str, workdir: str, force: bool) -> dict:
+def review(remote_url: str, workdir: str, force: bool,
+           max_files: int | None = None) -> dict:
     work = Path(workdir)
     work.mkdir(parents=True, exist_ok=True)
     cache_root = str(work / ".repocache")
@@ -71,17 +75,21 @@ def review(remote_url: str, workdir: str, force: bool) -> dict:
             conn, repo_id, prior["id"], eval_id, scope.cached
         )
 
+    # --max-files caps only what the agent re-evaluates; cache reuse
+    # (scope.cached / copy_unchanged_findings) is unaffected.
+    eval_files = scope.in_scope[:max_files] if max_files else scope.in_scope
+
     trace_id = str(uuid.uuid4())
     os.environ.setdefault("LANGSMITH_PROJECT", "project-reviewer")
     started = time.time()
-    if scope.in_scope:
-        raw = run_evaluation(repo_path, scope.in_scope)
+    if eval_files:
+        rows, raw = run_evaluation(repo_path, eval_files)
         # Persist the raw agent output so a zero-findings parse can be
         # diagnosed without paying for another full run.
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / f"raw-{eval_id}.txt").write_text(
             raw if isinstance(raw, str) else repr(raw), encoding="utf-8")
-        for r in parse_findings(raw):
+        for r in rows:
             h = file_hash(str(Path(repo_path) / r["file_path"])) \
                 if (Path(repo_path) / r["file_path"]).exists() else ""
             db.insert_finding(
@@ -102,7 +110,7 @@ def review(remote_url: str, workdir: str, force: bool) -> dict:
     ctx = {
         "repo_url": remote_url, "commit_sha": sha, "mode": scope.mode,
         "overall": overall, "cost": cost, "duration_sec": duration,
-        "changed_files": scope.in_scope,
+        "changed_files": eval_files,
         "findings": [
             {"file_path": r["file_path"], "criterion": r["criterion"],
              "verified": bool(r["verified"]),
@@ -128,6 +136,8 @@ def main(argv=None) -> int:
                         help="이력 탐색 웹 서버 실행")
     parser.add_argument("--progress", action="store_true",
                         help="진행상황 표시(비-TTY에서도 평문 한 줄 로그)")
+    parser.add_argument("--max-files", type=int, default=None,
+                        help="평가할 in-scope 파일 수 상한(검증용 저비용 실행)")
     args = parser.parse_args(argv)
     if args.serve:
         from app.server import serve
@@ -135,7 +145,8 @@ def main(argv=None) -> int:
         return 0
     if args.progress:
         os.environ["REVIEWER_PROGRESS"] = "1"
-    review(args.github_url, args.workdir, args.force)
+    review(args.github_url, args.workdir, args.force,
+           max_files=args.max_files)
     return 0
 
 

@@ -1,4 +1,3 @@
-import json
 import subprocess
 from pathlib import Path
 
@@ -19,14 +18,24 @@ def _origin(tmp_path):
     return o
 
 
-def _fake_agent_output(in_scope):
-    return json.dumps([
+def _origin3(tmp_path):
+    o = _origin(tmp_path)
+    run = lambda *a: subprocess.run(a, cwd=o, check=True)
+    (o / "c.py").write_text("z = 3\n")
+    run("git", "add", ".")
+    run("git", "commit", "-qm", "c2")
+    return o
+
+
+def _fake_agent_rows(in_scope):
+    """Normalized finding rows (the 6 keys) — what run_agent now returns."""
+    return [
         {"file_path": f, "criterion": "deadcode",
          "findings": [{"severity": "low", "location": f + ":1",
                        "evidence": "e", "msg": "m"}],
          "criterion_score": 80, "verified": True, "verify_note": "ok"}
         for f in in_scope
-    ])
+    ]
 
 
 def test_full_then_incremental_reuses_cache(tmp_path, monkeypatch):
@@ -35,7 +44,7 @@ def test_full_then_incremental_reuses_cache(tmp_path, monkeypatch):
 
     def fake_run_eval(repo_path, in_scope):
         calls.append(list(in_scope))
-        return _fake_agent_output(in_scope)
+        return _fake_agent_rows(in_scope), "<raw agent text>"
 
     monkeypatch.setattr(cli, "run_evaluation", fake_run_eval)
     monkeypatch.setattr(
@@ -66,3 +75,37 @@ def test_full_then_incremental_reuses_cache(tmp_path, monkeypatch):
     assert latest["mode"] == "incremental"         # mode recorded
     reports = list((Path(workdir) / "output").glob("report-*.html"))
     assert len(reports) == 2                        # one HTML per run
+
+
+def test_max_files_caps_evaluation(tmp_path, monkeypatch):
+    origin = _origin3(tmp_path)
+    calls = []
+
+    def fake_run_eval(repo_path, in_scope):
+        calls.append(list(in_scope))
+        return _fake_agent_rows(in_scope), "<raw agent text>"
+
+    monkeypatch.setattr(cli, "run_evaluation", fake_run_eval)
+    monkeypatch.setattr(
+        cli, "aggregate_cost",
+        lambda **kw: {"input_tokens": 1, "output_tokens": 1,
+                      "cost_usd": 0.0, "run_url": None},
+    )
+    workdir = tmp_path / "wd"
+
+    ctx = cli.review(str(origin), workdir=str(workdir), force=True,
+                     max_files=1)
+
+    # The cap limited the agent to exactly one in-scope file.
+    assert len(calls) == 1
+    assert len(calls[0]) == 1
+    assert calls[0][0] in {"a.py", "b.py", "c.py"}
+
+    # The run still completes: HTML written + evaluation row finalized.
+    reports = list((Path(workdir) / "output").glob("report-*.html"))
+    assert len(reports) == 1
+    db = cli.db.connect(str(Path(workdir) / "reviewer.sqlite3"))
+    repo = cli.db.get_repo_by_url(db, str(origin))
+    latest = cli.db.latest_evaluation(db, repo["id"])
+    assert latest["duration_sec"] is not None
+    assert ctx["changed_files"] == calls[0]
