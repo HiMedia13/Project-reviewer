@@ -1,9 +1,33 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Environments
+.venv/
 .env
+
+# Project-Reviewer runtime artifacts (clones, SQLite, HTML/raw reports, logs)
+.reviewer/
+.reviewer-smoke/
 .repocache/
 output/
 *.sqlite3
 *.db
-.venv/
+*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
