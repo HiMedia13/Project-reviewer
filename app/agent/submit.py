@@ -2,18 +2,23 @@
 
 Real runs showed the orchestrator LLM emitting its final findings as
 unreliable free text, so regex parsing yielded zero findings. Instead the
-agent calls this tool: its argument is schema-validated by
-LangChain/Anthropic and the normalized rows are captured deterministically
-into a holder dict the caller owns, so the run path reads structured data.
+agent calls this tool: the model is *guided* toward the target shape via
+the tool/arg description, but the argument is intentionally typed
+permissively (``list[dict]``) so that improvised / malformed model output
+(e.g. ``criterion: 123``, ``criterion_score: 80.9``,
+``findings: "garbage"``) NEVER triggers a pydantic ``ValidationError``
+before the callback runs. ``normalize_rows`` is the SOLE coercion
+authority: every payload the model emits reaches it, and it coerces /
+drops defensively without ever raising.
 
-The pinned schema mirrors what ``app/db.py`` ``insert_finding`` and
-``app/findings_parser.parse_findings`` consume.
+The normalized row shape mirrors what ``app/db.py`` ``insert_finding``
+and ``app/findings_parser.parse_findings`` consume.
 """
 
 from typing import Any
 
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # Exactly the keys every normalized finding row must carry.
 _ROW_KEYS = (
@@ -26,9 +31,30 @@ _ROW_KEYS = (
 )
 _ITEM_KEYS = ("severity", "location", "evidence", "msg")
 
+# Human/model-readable description of the intended row schema. This is the
+# ONLY place the strict shape is asserted toward the model — strict typing
+# is deliberately NOT used on the args schema (it would raise before the
+# never-raising normalize_rows callback runs).
+_ROW_SHAPE_DOC = (
+    "Each row is an object with: "
+    "file_path (string, required, repo-relative path); "
+    "criterion (string, e.g. 'security'); "
+    "findings (array of objects, each {severity, location, evidence, msg}); "
+    "criterion_score (integer or null); "
+    "verified (boolean); "
+    "verify_note (string)."
+)
+
 
 class FindingItem(BaseModel):
-    """One issue found inside a file. All fields optional with defaults."""
+    """Documentation-only model of one finding sub-item.
+
+    NOT used in the args_schema validation path (strict typing there
+    would raise on improvised model output). Kept purely as a structured
+    description of the intended shape for callers/readers.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     severity: str = "low"
     location: str = ""
@@ -37,7 +63,12 @@ class FindingItem(BaseModel):
 
 
 class FindingRow(BaseModel):
-    """Per-file, per-criterion findings row. Mirrors the DB insert shape."""
+    """Documentation-only model of one findings row.
+
+    NOT used in the args_schema validation path; see ``FindingItem``.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     file_path: str = Field(..., description="Repo-relative path of the file.")
     criterion: str = "unknown"
@@ -48,11 +79,28 @@ class FindingRow(BaseModel):
 
 
 class SubmitFindingsArgs(BaseModel):
-    """Args schema for the submit_findings tool."""
+    """Permissive args schema for the submit_findings tool.
 
-    findings: list[FindingRow] = Field(
+    ``findings`` is typed as ``list[Any]`` (NOT ``list[FindingRow]`` or
+    even ``list[dict]``) so that any JSON the model emits passes pydantic
+    validation and reaches the callback, where ``normalize_rows`` is the
+    sole coercion authority.
+    ``extra="ignore"`` is pinned explicitly so improvised top-level keys
+    are dropped deterministically rather than relying on the default.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    # ``list[Any]`` (not ``list[dict]``): even ``list[dict]`` raises a
+    # pydantic ValidationError when an element is not a dict (e.g. the
+    # model emits ``[123, "nope"]``). The never-raise contract requires
+    # EVERY element to pass through to normalize_rows untouched.
+    findings: list[Any] = Field(
         default_factory=list,
-        description="The full list of per-file findings rows to record.",
+        description=(
+            "The full list of per-file findings rows to record. "
+            + _ROW_SHAPE_DOC
+        ),
     )
 
 
@@ -66,15 +114,29 @@ def _as_dict(obj: Any) -> dict | None:
 
 
 def _coerce_int_or_none(value: Any) -> int | None:
-    """Return an int when value is int-like, otherwise None. Never raises."""
+    """Return an int when value is int-like, otherwise None. Never raises.
+
+    Bools are explicitly NOT ints here (``True``/``False`` -> None).
+    Float-like values are accepted only when they are exact integers
+    ("80" -> 80, 80.0 -> 80, "3.5" -> None, "n/a" -> None).
+    """
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, int):
         return value
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        s = value.strip()
+        try:
+            return int(s)
+        except (TypeError, ValueError):
+            try:
+                f = float(s)
+            except (TypeError, ValueError):
+                return None
+            return int(f) if f.is_integer() else None
+    return None
 
 
 def _normalize_item(raw: Any) -> dict:
@@ -89,11 +151,14 @@ def _normalize_item(raw: Any) -> dict:
 
 
 def normalize_rows(raw_list: Any) -> list[dict]:
-    """Pure, never-raising normalizer used by the tool and finalize guard.
+    """Pure, never-raising normalizer: the SOLE coercion authority.
 
-    Accepts a list of dicts / pydantic models and returns plain-dict rows
-    with exactly ``_ROW_KEYS``. Rows lacking a non-empty string
-    ``file_path`` are dropped. Anything that is not a list yields ``[]``.
+    Used both by the tool callback and (later, task #21) directly by the
+    deterministic finalize guard. Accepts a list of dicts / pydantic
+    models and returns plain-dict rows with exactly ``_ROW_KEYS``. Rows
+    lacking a non-empty string ``file_path`` are dropped. A row whose
+    ``findings`` is not a list yields ``findings == []``. Anything that is
+    not a list yields ``[]``. Never raises.
     """
     if not isinstance(raw_list, list):
         return []
@@ -138,17 +203,21 @@ def normalize_rows(raw_list: Any) -> list[dict]:
 def make_submit_tool(holder: dict) -> StructuredTool:
     """Return the ``submit_findings`` tool, capturing into *holder*.
 
-    The tool's input is validated by LangChain/Anthropic against
-    ``SubmitFindingsArgs``. On call it normalizes the rows, overwrites
-    ``holder["findings"]`` and sets ``holder["submitted"] = True``. It
-    never raises on malformed input: unusable payloads record 0 rows.
+    The tool argument is validated only against the permissive
+    ``SubmitFindingsArgs`` (``findings: list[Any]``), so any JSON the
+    model emits reaches the callback. The callback runs ``normalize_rows``
+    (the sole coercion authority), OVERWRITES ``holder["findings"]`` and
+    sets ``holder["submitted"] = True``. It never raises on malformed
+    input: unusable payloads record 0 rows.
     """
 
-    def _submit(findings: list[FindingRow] | None = None) -> str:
+    def _submit(findings: list[Any] | None = None) -> str:
         try:
-            rows = normalize_rows(list(findings) if findings else [])
+            rows = normalize_rows(findings if isinstance(findings, list)
+                                  else [])
         except Exception:
             rows = []
+        # Overwrite (not append): the holder reflects only the latest call.
         holder["findings"] = rows
         holder["submitted"] = True
         return f"OK: recorded {len(rows)} finding rows."
@@ -158,10 +227,8 @@ def make_submit_tool(holder: dict) -> StructuredTool:
         name="submit_findings",
         description=(
             "Submit the final structured review findings. Call this exactly "
-            "once with the complete list of per-file findings rows. Each row: "
-            "file_path (required), criterion, findings[] "
-            "(severity/location/evidence/msg), criterion_score, verified, "
-            "verify_note."
+            "once with the complete list of per-file findings rows. "
+            + _ROW_SHAPE_DOC
         ),
         args_schema=SubmitFindingsArgs,
     )
