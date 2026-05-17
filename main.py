@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import sys
 import time
@@ -116,9 +117,8 @@ def review(remote_url: str, workdir: str, force: bool,
         # forward. prior may be None and overall_json may be
         # None/invalid/missing the key — degrade to {} on any failure,
         # never raise.
-        import json as _cf_json
         try:
-            parsed = _cf_json.loads(prior["overall_json"])
+            parsed = json.loads(prior["overall_json"])
             tech_assessment = (
                 parsed.get("tech_assessment", {})
                 if isinstance(parsed, dict) else {}
@@ -139,7 +139,6 @@ def review(remote_url: str, workdir: str, force: bool,
     )
     db.finalize_evaluation(conn, eval_id, overall, cost, duration)
 
-    import json as _json
     ctx = {
         "repo_url": remote_url, "commit_sha": sha, "mode": scope.mode,
         "overall": overall, "cost": cost, "duration_sec": duration,
@@ -149,7 +148,7 @@ def review(remote_url: str, workdir: str, force: bool,
             {"file_path": r["file_path"], "criterion": r["criterion"],
              "verified": bool(r["verified"]),
              "verify_note": r["verify_note"] or "",
-             "findings": _json.loads(r["findings_json"])}
+             "findings": json.loads(r["findings_json"])}
             for r in all_rows
         ],
     }
