@@ -94,10 +94,16 @@ def review(remote_url: str, workdir: str, force: bool) -> dict:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Project-Reviewer")
-    parser.add_argument("github_url")
+    parser.add_argument("github_url", nargs="?")
     parser.add_argument("--workdir", default=".reviewer")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--serve", action="store_true",
+                        help="이력 탐색 웹 서버 실행")
     args = parser.parse_args(argv)
+    if args.serve:
+        from app.server import serve
+        serve(str(Path(args.workdir) / "reviewer.sqlite3"))
+        return 0
     review(args.github_url, args.workdir, args.force)
     return 0
 

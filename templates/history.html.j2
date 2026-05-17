@@ -1,0 +1,15 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Project-Reviewer</title>
+<style>body{font-family:system-ui;margin:2rem;background:#0f1115;color:#eee}
+a{color:#8bd450}table{border-collapse:collapse}td,th{padding:.4rem;border-bottom:1px solid #2a2f3a}</style>
+</head><body>
+{% if repos is defined %}
+<h1>Repos</h1><ul>
+{% for r in repos %}<li><a href="/repo/{{ r.id }}">{{ r.remote_url }}</a></li>{% endfor %}
+</ul>
+{% else %}
+<h1>{{ repo.remote_url }}</h1>
+<table><tr><th>id</th><th>sha</th><th>mode</th><th>score</th><th>cost</th></tr>
+{% for e in evals %}<tr><td>{{ e.id }}</td><td>{{ e.commit_sha[:10] }}</td>
+<td>{{ e.mode }}</td><td>{{ e.score }}</td><td>${{ "%.4f"|format(e.cost) }}</td></tr>{% endfor %}
+</table>{% endif %}
+</body></html>
